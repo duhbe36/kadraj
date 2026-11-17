@@ -115,6 +115,13 @@ const fetchPosterFromTmdb = async (rawTitle: string): Promise<string | null> => 
   return null;
 };
 
+const formatRuntime = (minutes?: number) => {
+  if (!minutes || minutes <= 0) return null;
+  const h = Math.floor(minutes / 60);
+  const m = minutes % 60;
+  return h > 0 ? `${minutes} dk (${h} sa ${m} dk)` : `${minutes} dk`;
+};
+
 export default function KadrajApp() {
   const [currentUser, setCurrentUser] = useState<string | null>(null);
   const [isGuest, setIsGuest] = useState<boolean>(false);
@@ -139,12 +146,23 @@ export default function KadrajApp() {
   const [isSearchingGlobal, setIsSearchingGlobal] = useState(false);
   const [quickToast, setQuickToast] = useState<string>("");
 
+  // Yapım Detay Modalı State'leri
+  const [detailModalOpen, setDetailModalOpen] = useState(false);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [detailData, setDetailData] = useState<any | null>(null);
+  const [detailRawTmdbItem, setDetailRawTmdbItem] = useState<any | null>(null);
+  const [selectedDetailSeason, setSelectedDetailSeason] = useState<number>(1);
+  const [seasonEpisodes, setSeasonEpisodes] = useState<any[]>([]);
+  const [loadingEpisodes, setLoadingEpisodes] = useState(false);
+  const [detailCommentText, setDetailCommentText] = useState("");
+  const [detailCommentSpoiler, setDetailCommentSpoiler] = useState(false);
+
   // Afiş senkronizasyon state'leri
   const [isSyncingPosters, setIsSyncingPosters] = useState(false);
   const [syncProgress, setSyncProgress] = useState("");
   const autoSyncedRef = useRef(false);
 
-  // Modal Arama & Ekleme State'leri
+  // Detaylı Ekleme Modalı State'leri
   const [showAddModal, setShowAddModal] = useState(false);
   const [addTarget, setAddTarget] = useState<"personal" | "shared">("personal");
   const [tmdbQuery, setTmdbQuery] = useState("");
@@ -228,9 +246,7 @@ export default function KadrajApp() {
         setGlobalSearchResults([]);
         return;
       }
-      if (!TMDB_API_KEY) {
-        return;
-      }
+      if (!TMDB_API_KEY) return;
       setIsSearchingGlobal(true);
       try {
         const res = await fetch(
@@ -253,7 +269,206 @@ export default function KadrajApp() {
     return () => clearTimeout(timer);
   }, [globalSearchQuery]);
 
-  // Üst Arama Çubuğundan Tek Tıkla Ekleme
+  // Dizi Sezon Bölümlerini Çekme
+  const loadTvSeasonEpisodes = async (tvId: number, seasonNum: number) => {
+    if (!TMDB_API_KEY) return;
+    setLoadingEpisodes(true);
+    setSelectedDetailSeason(seasonNum);
+    try {
+      const res = await fetch(
+        `https://api.themoviedb.org/3/tv/${tvId}/season/${seasonNum}?api_key=${TMDB_API_KEY}&language=tr-TR`
+      );
+      const data = await res.json();
+      setSeasonEpisodes(data.episodes || []);
+    } catch (err) {
+      console.error(err);
+      setSeasonEpisodes([]);
+    } finally {
+      setLoadingEpisodes(false);
+    }
+  };
+
+  // Film veya Dizi Detay Penceresini Açma
+  const openMediaDetail = async (input: {
+    tmdbId?: number;
+    mediaType?: "movie" | "tv";
+    title: string;
+    posterUrl?: string | null;
+    rawTmdbItem?: any;
+  }) => {
+    setDetailModalOpen(true);
+    setDetailLoading(true);
+    setDetailData(null);
+    setSeasonEpisodes([]);
+    setDetailRawTmdbItem(input.rawTmdbItem || null);
+
+    if (!TMDB_API_KEY) {
+      setDetailData({
+        title: input.title,
+        overview: "TMDB API anahtarı bulunamadı.",
+        poster_url: input.posterUrl,
+      });
+      setDetailLoading(false);
+      return;
+    }
+
+    try {
+      let targetId = input.tmdbId;
+      let targetType = input.mediaType;
+
+      if (!targetId || !targetType) {
+        const lower = input.title.trim().toLowerCase();
+        const cleanQuery = (TITLE_ALIASES[lower] || input.title)
+          .replace(/\(\d{4}\)/g, "")
+          .trim();
+        const searchRes = await fetch(
+          `https://api.themoviedb.org/3/search/multi?api_key=${TMDB_API_KEY}&language=tr-TR&query=${encodeURIComponent(
+            cleanQuery
+          )}`
+        );
+        const searchJson = await searchRes.json();
+        const firstMatch = (searchJson.results || []).find(
+          (r: any) => r.media_type === "movie" || r.media_type === "tv"
+        );
+        if (firstMatch) {
+          targetId = firstMatch.id;
+          targetType = firstMatch.media_type;
+          if (!input.rawTmdbItem) {
+            setDetailRawTmdbItem(firstMatch);
+          }
+        }
+      }
+
+      if (!targetId || !targetType) {
+        setDetailData({
+          title: input.title,
+          overview: "Bu yapım için TMDB detay bilgisi bulunamadı.",
+          poster_url: input.posterUrl,
+        });
+        setDetailLoading(false);
+        return;
+      }
+
+      const resTr = await fetch(
+        `https://api.themoviedb.org/3/${targetType}/${targetId}?api_key=${TMDB_API_KEY}&language=tr-TR&append_to_response=external_ids`
+      );
+      const dataTr = await resTr.json();
+
+      let finalOverview = dataTr.overview;
+      if (!finalOverview) {
+        const resEn = await fetch(
+          `https://api.themoviedb.org/3/${targetType}/${targetId}?api_key=${TMDB_API_KEY}&language=en-US`
+        );
+        const dataEn = await resEn.json();
+        finalOverview = dataEn.overview || "Konu özeti bulunmuyor.";
+      }
+
+      const validSeasons = (dataTr.seasons || []).filter(
+        (s: any) => s.season_number > 0
+      );
+
+      const enriched = {
+        tmdbId: targetId,
+        mediaType: targetType,
+        title: dataTr.title || dataTr.name || input.title,
+        originalTitle: dataTr.original_title || dataTr.original_name,
+        overview: finalOverview,
+        voteAverage: dataTr.vote_average,
+        imdbId: dataTr.external_ids?.imdb_id,
+        releaseYear: (dataTr.release_date || dataTr.first_air_date || "").slice(0, 4),
+        genres: (dataTr.genres || []).map((g: any) => g.name).join(", "),
+        runtime: dataTr.runtime,
+        numberOfSeasons: dataTr.number_of_seasons,
+        numberOfEpisodes: dataTr.number_of_episodes,
+        seasons: validSeasons,
+        poster_url: dataTr.poster_path
+          ? `https://image.tmdb.org/t/p/w500${dataTr.poster_path}`
+          : input.posterUrl,
+      };
+
+      setDetailData(enriched);
+
+      if (targetType === "tv" && validSeasons.length > 0) {
+        const firstSeasonNum = validSeasons[0].season_number;
+        await loadTvSeasonEpisodes(targetId, firstSeasonNum);
+      }
+    } catch (err) {
+      console.error("Detay yükleme hatası:", err);
+    } finally {
+      setDetailLoading(false);
+    }
+  };
+
+  // Detay Penceresindeki Yapım İçin Gruplardaki Üye Yorumları
+  const detailComments = useMemo(() => {
+    if (!detailData?.title) return [];
+    const targetKey = detailData.title.trim().toLowerCase();
+    const matchingMediaIds = mediaItems
+      .filter((m) => m.title.trim().toLowerCase() === targetKey)
+      .map((m) => String(m.id));
+    if (matchingMediaIds.length === 0) return [];
+    return comments.filter((c) => matchingMediaIds.includes(String(c.media_id)));
+  }, [detailData, mediaItems, comments]);
+
+  // Detay Penceresinin Altından Yorum Gönderme
+  const handleAddCommentFromDetail = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!detailCommentText.trim() || !detailData?.title || !currentUser || isGuest)
+      return;
+
+    const targetKey = detailData.title.trim().toLowerCase();
+    let existingMedia = mediaItems.find(
+      (m) => m.title.trim().toLowerCase() === targetKey
+    );
+
+    if (!existingMedia) {
+      const { data: created, error } = await supabase
+        .from("media_items")
+        .insert([
+          {
+            title: detailData.title,
+            category: detailData.mediaType === "tv" ? "Dizi" : "Yabancı Dram",
+            rating: Math.max(1, Math.round(detailData.voteAverage || 8)),
+            watched: false,
+            poster_url: detailData.poster_url || null,
+            release_year: detailData.releaseYear || null,
+            owner: currentUser.trim(),
+            is_shared_club: true,
+            is_legend: false,
+            group_name: selectedGroup,
+          },
+        ])
+        .select()
+        .single();
+
+      if (error || !created) return;
+      existingMedia = created;
+      setMediaItems((prev) => [created, ...prev]);
+    }
+
+    const { data: newComment, error: cErr } = await supabase
+      .from("comments")
+      .insert([
+        {
+          media_id: existingMedia!.id,
+          username: currentUser,
+          content: detailCommentText.trim(),
+          is_spoiler: detailCommentSpoiler,
+          parent_id: null,
+          group_name: selectedGroup,
+        },
+      ])
+      .select()
+      .single();
+
+    if (!cErr && newComment) {
+      setComments((prev) => [...prev, newComment]);
+      setDetailCommentText("");
+      setDetailCommentSpoiler(false);
+    }
+  };
+
+  // Üst Arama Çubuğundan veya Detay Penceresinden Tek Tıkla Ekleme
   const handleQuickAddFromTopSearch = async (
     item: any,
     mode: "personal" | "shared" | "legend"
@@ -828,6 +1043,8 @@ export default function KadrajApp() {
           if (pool.length > 0) {
             const picked = pool[Math.floor(Math.random() * pool.length)];
             setWheelResult({
+              tmdbId: picked.id,
+              mediaType: "movie",
               title: picked.title,
               poster_url: picked.poster_path
                 ? `https://image.tmdb.org/t/p/w500${picked.poster_path}`
@@ -851,6 +1068,7 @@ export default function KadrajApp() {
     }, 700);
   };
 
+  // Davet Kodu ve Tek Kullanımlık Link Üretme
   const generateInviteCode = async (singleUseGuest = false) => {
     if (isGuest) return;
     const prefix = singleUseGuest ? "DAVUK-" : "KDRJ-";
@@ -880,6 +1098,23 @@ export default function KadrajApp() {
         );
       }
     }
+  };
+
+  // Davet Kodunu Silme
+  const handleDeleteInvite = async (inv: InviteItem) => {
+    if (isGuest) return;
+    const confirmed = window.confirm(
+      `"${inv.code}" davet kodunu listeden kalıcı olarak silmek istediğinize emin misiniz?`
+    );
+    if (!confirmed) return;
+
+    const { error } = await supabase.from("invites").delete().eq("id", inv.id);
+    if (error) {
+      alert("Davet kodu silinemedi: " + error.message);
+      return;
+    }
+    setInvites((prev) => prev.filter((item) => item.id !== inv.id));
+    showNotification(`🗑️ "${inv.code}" davet kodu silindi.`);
   };
 
   const founderLegends = useMemo(() => {
@@ -1084,82 +1319,100 @@ export default function KadrajApp() {
         </div>
 
         {/* HER SEKMEDE GÖRÜNÜR CANLI TMDB FİLM & DİZİ ARAMA ÇUBUĞU */}
-        {!isGuest && (
-          <div className="border-t border-gray-800/80 bg-[#0d1320] px-4 py-3">
-            <div className="max-w-7xl mx-auto relative">
-              <div className="flex flex-wrap items-center gap-3">
-                <div className="relative flex-1 min-w-[260px]">
-                  <input
-                    type="text"
-                    placeholder="🔍 Film veya dizi ara ve tek tıkla listeye ekle (TMDB Canlı Arama)..."
-                    value={globalSearchQuery}
-                    onChange={(e) => setGlobalSearchQuery(e.target.value)}
-                    className="w-full bg-[#131b2e] border border-amber-500/40 focus:border-amber-500 rounded-xl px-4 py-2.5 text-sm text-white outline-none"
-                  />
-                  {globalSearchQuery && (
-                    <button
-                      onClick={() => {
-                        setGlobalSearchQuery("");
-                        setGlobalSearchResults([]);
-                      }}
-                      className="absolute right-3 top-2.5 text-gray-400 hover:text-white text-sm"
-                    >
-                      ✕
-                    </button>
-                  )}
-                </div>
-                <span className="text-xs text-gray-400 hidden sm:inline">
-                  Aktif Grup: <strong className="text-amber-400">{selectedGroup}</strong>
-                </span>
+        <div className="border-t border-gray-800/80 bg-[#0d1320] px-4 py-3">
+          <div className="max-w-7xl mx-auto relative">
+            <div className="flex flex-wrap items-center gap-3">
+              <div className="relative flex-1 min-w-[260px]">
+                <input
+                  type="text"
+                  placeholder="🔍 Film veya dizi ara (Konusunu, puanını, sezon/bölümlerini ve üye yorumlarını görmek için tıkla)..."
+                  value={globalSearchQuery}
+                  onChange={(e) => setGlobalSearchQuery(e.target.value)}
+                  className="w-full bg-[#131b2e] border border-amber-500/40 focus:border-amber-500 rounded-xl px-4 py-2.5 text-sm text-white outline-none"
+                />
+                {globalSearchQuery && (
+                  <button
+                    onClick={() => {
+                      setGlobalSearchQuery("");
+                      setGlobalSearchResults([]);
+                    }}
+                    className="absolute right-3 top-2.5 text-gray-400 hover:text-white text-sm"
+                  >
+                    ✕
+                  </button>
+                )}
               </div>
+              <span className="text-xs text-gray-400 hidden sm:inline">
+                Aktif Grup: <strong className="text-amber-400">{selectedGroup}</strong>
+              </span>
+            </div>
 
-              {/* Canlı Arama Sonuç Açılır Penceresi */}
-              {globalSearchQuery.trim().length >= 2 && (
-                <div className="absolute left-0 right-0 top-12 bg-[#131b2e] border border-amber-500/40 rounded-2xl shadow-2xl max-h-96 overflow-y-auto z-50 divide-y divide-gray-800">
-                  {!TMDB_API_KEY ? (
-                    <div className="p-4 text-xs text-red-300">
-                      ⚠️ TMDB API anahtarı bulunamadı. Lütfen Vercel ayarlarından{" "}
-                      <code>NEXT_PUBLIC_TMDB_API_KEY</code> değişkenini ekleyin.
-                    </div>
-                  ) : isSearchingGlobal ? (
-                    <div className="p-4 text-xs text-gray-400">
-                      TMDB veritabanında aranıyor...
-                    </div>
-                  ) : globalSearchResults.length === 0 ? (
-                    <div className="p-4 text-xs text-gray-400">
-                      &quot;{globalSearchQuery}&quot; için sonuç bulunamadı.
-                    </div>
-                  ) : (
-                    globalSearchResults.map((r) => (
+            {/* Canlı Arama Sonuç Açılır Penceresi */}
+            {globalSearchQuery.trim().length >= 2 && (
+              <div className="absolute left-0 right-0 top-12 bg-[#131b2e] border border-amber-500/40 rounded-2xl shadow-2xl max-h-96 overflow-y-auto z-50 divide-y divide-gray-800">
+                {!TMDB_API_KEY ? (
+                  <div className="p-4 text-xs text-red-300">
+                    ⚠️ TMDB API anahtarı bulunamadı. Lütfen Vercel ayarlarından{" "}
+                    <code>NEXT_PUBLIC_TMDB_API_KEY</code> değişkenini ekleyin.
+                  </div>
+                ) : isSearchingGlobal ? (
+                  <div className="p-4 text-xs text-gray-400">
+                    TMDB veritabanında aranıyor...
+                  </div>
+                ) : globalSearchResults.length === 0 ? (
+                  <div className="p-4 text-xs text-gray-400">
+                    &quot;{globalSearchQuery}&quot; için sonuç bulunamadı.
+                  </div>
+                ) : (
+                  globalSearchResults.map((r) => (
+                    <div
+                      key={r.id}
+                      className="p-3 flex flex-wrap items-center justify-between gap-3 hover:bg-[#0b0f17]/80 transition"
+                    >
                       <div
-                        key={r.id}
-                        className="p-3 flex flex-wrap items-center justify-between gap-3 hover:bg-[#0b0f17]/80 transition"
+                        onClick={() => {
+                          openMediaDetail({
+                            tmdbId: r.id,
+                            mediaType: r.media_type,
+                            title: r.title || r.name,
+                            posterUrl: r.poster_path
+                              ? `https://image.tmdb.org/t/p/w500${r.poster_path}`
+                              : null,
+                            rawTmdbItem: r,
+                          });
+                          setGlobalSearchQuery("");
+                          setGlobalSearchResults([]);
+                        }}
+                        className="flex items-center gap-3 min-w-0 flex-1 cursor-pointer group"
                       >
-                        <div className="flex items-center gap-3 min-w-0">
-                          {r.poster_path ? (
-                            <img
-                              src={`https://image.tmdb.org/t/p/w92${r.poster_path}`}
-                              alt=""
-                              className="w-10 h-14 object-cover rounded-lg flex-shrink-0"
-                            />
-                          ) : (
-                            <div className="w-10 h-14 bg-gray-800 rounded-lg flex items-center justify-center text-xs text-gray-500 flex-shrink-0">
-                              🎬
-                            </div>
-                          )}
-                          <div className="min-w-0">
-                            <p className="text-sm font-bold text-white truncate">
-                              {r.title || r.name}
-                            </p>
-                            <p className="text-xs text-gray-400">
-                              {r.media_type === "tv" ? "📺 Dizi" : "🎬 Film"} •{" "}
-                              {(r.release_date || r.first_air_date || "").slice(0, 4) ||
-                                "Yıl Yok"}{" "}
-                              • ★ {r.vote_average ? r.vote_average.toFixed(1) : "-"}
-                            </p>
+                        {r.poster_path ? (
+                          <img
+                            src={`https://image.tmdb.org/t/p/w92${r.poster_path}`}
+                            alt=""
+                            className="w-10 h-14 object-cover rounded-lg flex-shrink-0 group-hover:ring-2 group-hover:ring-amber-500"
+                          />
+                        ) : (
+                          <div className="w-10 h-14 bg-gray-800 rounded-lg flex items-center justify-center text-xs text-gray-500 flex-shrink-0">
+                            🎬
                           </div>
+                        )}
+                        <div className="min-w-0">
+                          <p className="text-sm font-bold text-white group-hover:text-amber-400 truncate transition">
+                            {r.title || r.name}
+                          </p>
+                          <p className="text-xs text-gray-400">
+                            {r.media_type === "tv" ? "📺 Dizi" : "🎬 Film"} •{" "}
+                            {(r.release_date || r.first_air_date || "").slice(0, 4) ||
+                              "Yıl Yok"}{" "}
+                            • ★ {r.vote_average ? r.vote_average.toFixed(1) : "-"}{" "}
+                            <span className="text-amber-400/80 underline ml-1">
+                              (Detay & Yorumlar)
+                            </span>
+                          </p>
                         </div>
+                      </div>
 
+                      {!isGuest && (
                         <div className="flex flex-wrap items-center gap-2">
                           <button
                             onClick={() =>
@@ -1188,14 +1441,14 @@ export default function KadrajApp() {
                             </button>
                           )}
                         </div>
-                      </div>
-                    ))
-                  )}
-                </div>
-              )}
-            </div>
+                      )}
+                    </div>
+                  ))
+                )}
+              </div>
+            )}
           </div>
-        )}
+        </div>
       </header>
 
       {/* Bildirim Toast */}
@@ -1217,8 +1470,8 @@ export default function KadrajApp() {
                   </h2>
                   <p className="text-gray-400 text-sm">
                     {isFounder
-                      ? "Kurucu yetkisi aktif: Üstteki arama çubuğundan yeni efsane ekleyebilir veya yanlış filmleri çıkarabilirsin."
-                      : "Kulüp kurucusu Duhan tarafından seçilen başyapıtlar."}
+                      ? "Kurucu yetkisi aktif: Kartlara tıklayarak detay ve yorumları görebilir, yanlış filmleri çıkarabilirsin."
+                      : "Kulüp kurucusu Duhan tarafından seçilen başyapıtlar. Detay ve yorumlar için üzerine tıkla."}
                   </p>
                 </div>
 
@@ -1243,12 +1496,21 @@ export default function KadrajApp() {
                       key={item.id}
                       className="bg-[#0b0f17] border border-gray-800 rounded-xl overflow-hidden flex flex-col justify-between group hover:border-amber-500/50 transition"
                     >
-                      <div>
+                      <div
+                        onClick={() =>
+                          openMediaDetail({
+                            title: item.title,
+                            mediaType: item.category === "Dizi" ? "tv" : undefined,
+                            posterUrl: posterSrc,
+                          })
+                        }
+                        className="cursor-pointer"
+                      >
                         {posterSrc ? (
                           <img
                             src={posterSrc}
                             alt={item.title}
-                            className="w-full h-56 object-cover"
+                            className="w-full h-56 object-cover group-hover:opacity-90 transition"
                           />
                         ) : (
                           <div className="w-full h-56 bg-gray-900 flex items-center justify-center text-gray-500 text-xs">
@@ -1256,7 +1518,7 @@ export default function KadrajApp() {
                           </div>
                         )}
                         <div className="p-3">
-                          <h3 className="font-bold text-sm text-white line-clamp-1">
+                          <h3 className="font-bold text-sm text-white group-hover:text-amber-400 line-clamp-1">
                             {item.title}
                           </h3>
                           <p className="text-xs text-amber-400 mt-1">
@@ -1295,9 +1557,18 @@ export default function KadrajApp() {
                   {memberLegends.map((item) => (
                     <div
                       key={item.id}
-                      className="bg-[#0b0f17] border border-gray-800 rounded-xl p-3"
+                      onClick={() =>
+                        openMediaDetail({
+                          title: item.title,
+                          mediaType: item.category === "Dizi" ? "tv" : undefined,
+                          posterUrl: item.poster_url || item.poster,
+                        })
+                      }
+                      className="bg-[#0b0f17] border border-gray-800 hover:border-amber-500/50 rounded-xl p-3 cursor-pointer transition"
                     >
-                      <h4 className="font-bold text-sm">{item.title}</h4>
+                      <h4 className="font-bold text-sm hover:text-amber-400">
+                        {item.title}
+                      </h4>
                       <p className="text-xs text-amber-400 mt-1">
                         ★ {item.rating}/10 ({item.owner})
                       </p>
@@ -1359,9 +1630,7 @@ export default function KadrajApp() {
                     : `👤 ${currentUser} - Kişisel Film & Dizi Arşivim`}
                 </h2>
                 <p className="text-gray-400 text-sm mt-1">
-                  {activeTab === "shared"
-                    ? `Bu liste yalnızca "${selectedGroup}" grubundaki arkadaşlarınla ortaktır.`
-                    : "Bu liste sadece sana özeldir. İstediğin yapımı ekleyip çıkarabilirsin."}
+                  Konusunu, puanını, sezon/bölümlerini ve yorumlarını görmek için herhangi bir yapımın üzerine tıkla.
                 </p>
               </div>
               <div className="flex flex-wrap items-center gap-2">
@@ -1435,14 +1704,23 @@ export default function KadrajApp() {
                 return (
                   <div
                     key={item.id}
-                    className="bg-[#131b2e] border border-gray-800 rounded-xl p-4 flex items-center justify-between gap-4 hover:border-gray-700 transition"
+                    className="bg-[#131b2e] border border-gray-800 rounded-xl p-4 flex items-center justify-between gap-4 hover:border-amber-500/40 transition"
                   >
-                    <div className="flex items-center gap-3.5 min-w-0">
+                    <div
+                      onClick={() =>
+                        openMediaDetail({
+                          title: item.title,
+                          mediaType: item.category === "Dizi" ? "tv" : undefined,
+                          posterUrl: posterSrc,
+                        })
+                      }
+                      className="flex items-center gap-3.5 min-w-0 flex-1 cursor-pointer group"
+                    >
                       {posterSrc ? (
                         <img
                           src={posterSrc}
                           alt={item.title}
-                          className="w-14 h-20 object-cover rounded-lg flex-shrink-0"
+                          className="w-14 h-20 object-cover rounded-lg flex-shrink-0 group-hover:ring-2 group-hover:ring-amber-500"
                         />
                       ) : (
                         <div className="w-14 h-20 bg-gray-800 rounded-lg flex items-center justify-center text-xs text-gray-500 flex-shrink-0">
@@ -1451,7 +1729,7 @@ export default function KadrajApp() {
                       )}
                       <div className="min-w-0">
                         <h3
-                          className={`font-bold text-sm truncate ${
+                          className={`font-bold text-sm truncate group-hover:text-amber-400 transition ${
                             item.watched ? "line-through text-gray-400" : "text-white"
                           }`}
                         >
@@ -1582,16 +1860,26 @@ export default function KadrajApp() {
               <div className="bg-[#0b0f17] border border-amber-500/40 rounded-xl p-5 space-y-4">
                 <p className="text-xs text-amber-400 font-semibold">{wheelReason}</p>
                 {wheelResult && (
-                  <div className="flex flex-col sm:flex-row items-center gap-5">
+                  <div
+                    onClick={() =>
+                      openMediaDetail({
+                        tmdbId: wheelResult.tmdbId,
+                        mediaType: wheelResult.mediaType,
+                        title: wheelResult.title,
+                        posterUrl: wheelResult.poster_url,
+                      })
+                    }
+                    className="flex flex-col sm:flex-row items-center gap-5 cursor-pointer group"
+                  >
                     {wheelResult.poster_url && (
                       <img
                         src={wheelResult.poster_url}
                         alt={wheelResult.title}
-                        className="w-32 h-48 object-cover rounded-xl"
+                        className="w-32 h-48 object-cover rounded-xl group-hover:ring-2 group-hover:ring-amber-500"
                       />
                     )}
                     <div className="space-y-2 text-center sm:text-left">
-                      <h3 className="text-2xl font-bold text-white">
+                      <h3 className="text-2xl font-bold text-white group-hover:text-amber-400">
                         {wheelResult.title}{" "}
                         {wheelResult.release_year
                           ? `(${wheelResult.release_year})`
@@ -1730,6 +2018,11 @@ export default function KadrajApp() {
                                 <span className="font-bold text-amber-400">
                                   {c.username}
                                 </span>
+                                {c.group_name && (
+                                  <span className="text-[10px] text-gray-500">
+                                    ({c.group_name})
+                                  </span>
+                                )}
                                 {(c.season_num || c.episode_num) && (
                                   <span className="bg-blue-900/40 text-blue-300 border border-blue-700/40 px-2 py-0.5 rounded text-[10px]">
                                     {c.season_num ? `S${c.season_num}` : ""}
@@ -1855,7 +2148,7 @@ export default function KadrajApp() {
                 🔑 Çoklu Grup & Davet Kodu Yönetimi
               </h2>
               <p className="text-gray-400 text-sm mt-1">
-                Arkadaş çevrene özel yeni bir grup adı yazarak (Örn: Konya Grubu) davet kodu üretebilirsin. O kodla girenler doğrudan o grubun ortak arşivine bağlanır.
+                Arkadaş çevrene özel yeni bir grup adı yazarak (Örn: Konya Grubu) davet kodu üretebilir veya kullanılmış kodları sağdaki çöp kutusuyla silebilirsin.
               </p>
             </div>
 
@@ -1887,34 +2180,336 @@ export default function KadrajApp() {
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
-              {invites.map((inv) => (
-                <div
-                  key={inv.id}
-                  className="bg-[#0b0f17] border border-gray-800 rounded-xl p-4 flex items-center justify-between"
-                >
-                  <div>
-                    <span className="font-mono font-bold text-amber-400 text-lg">
-                      {inv.code}
-                    </span>
-                    <p className="text-xs text-gray-400 mt-0.5">
-                      Grup: <strong className="text-white">{inv.group_name || "Genel Kulüp"}</strong>
-                    </p>
-                  </div>
-                  <span
-                    className={`text-xs px-2.5 py-1 rounded-full ${
-                      inv.is_used
-                        ? "bg-gray-800 text-gray-400"
-                        : "bg-green-900/40 text-green-300"
-                    }`}
+              {invites.map((inv) => {
+                const canDeleteInvite =
+                  isFounder ||
+                  inv.created_by?.toLowerCase() === currentUser.toLowerCase();
+
+                return (
+                  <div
+                    key={inv.id}
+                    className="bg-[#0b0f17] border border-gray-800 rounded-xl p-4 flex items-center justify-between gap-2"
                   >
-                    {inv.is_used ? `Kullanan: ${inv.used_by}` : "Aktif Kod"}
-                  </span>
-                </div>
-              ))}
+                    <div className="min-w-0">
+                      <span className="font-mono font-bold text-amber-400 text-lg">
+                        {inv.code}
+                      </span>
+                      <p className="text-xs text-gray-400 mt-0.5 truncate">
+                        Grup:{" "}
+                        <strong className="text-white">
+                          {inv.group_name || "Genel Kulüp"}
+                        </strong>
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2 flex-shrink-0">
+                      <span
+                        className={`text-xs px-2.5 py-1 rounded-full ${
+                          inv.is_used
+                            ? "bg-gray-800 text-gray-400"
+                            : "bg-green-900/40 text-green-300"
+                        }`}
+                      >
+                        {inv.is_used ? `Kullanan: ${inv.used_by}` : "Aktif Kod"}
+                      </span>
+                      {canDeleteInvite && (
+                        <button
+                          onClick={() => handleDeleteInvite(inv)}
+                          title="Bu davet kodunu sil"
+                          className="p-1.5 rounded-lg bg-red-900/30 hover:bg-red-700 text-red-300 text-xs transition"
+                        >
+                          🗑️
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           </div>
         )}
       </main>
+
+      {/* YAPIM DETAY MODALI */}
+      {detailModalOpen && (
+        <div
+          onClick={() => setDetailModalOpen(false)}
+          className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 z-50"
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="bg-[#131b2e] border border-amber-500/40 rounded-2xl max-w-3xl w-full max-h-[90vh] overflow-y-auto shadow-2xl"
+          >
+            {detailLoading || !detailData ? (
+              <div className="p-12 text-center text-gray-300 text-sm">
+                🎬 Yapım detayları, sezon/bölüm listesi ve grup yorumları yükleniyor...
+              </div>
+            ) : (
+              <div className="p-6 space-y-6">
+                <div className="flex flex-col sm:flex-row gap-6">
+                  {detailData.poster_url ? (
+                    <img
+                      src={detailData.poster_url}
+                      alt={detailData.title}
+                      className="w-40 h-60 object-cover rounded-xl flex-shrink-0 mx-auto sm:mx-0 shadow-lg"
+                    />
+                  ) : (
+                    <div className="w-40 h-60 bg-gray-800 rounded-xl flex items-center justify-center text-gray-500 text-xs flex-shrink-0 mx-auto sm:mx-0">
+                      Afiş Yok
+                    </div>
+                  )}
+
+                  <div className="flex-1 space-y-3">
+                    <div className="flex items-start justify-between gap-2">
+                      <div>
+                        <h2 className="text-2xl font-extrabold text-white">
+                          {detailData.title}{" "}
+                          {detailData.releaseYear ? `(${detailData.releaseYear})` : ""}
+                        </h2>
+                        {detailData.originalTitle &&
+                          detailData.originalTitle !== detailData.title && (
+                            <p className="text-xs text-gray-400">
+                              Orijinal Adı: {detailData.originalTitle}
+                            </p>
+                          )}
+                      </div>
+                      <button
+                        onClick={() => setDetailModalOpen(false)}
+                        className="text-gray-400 hover:text-white text-lg px-2"
+                      >
+                        ✕
+                      </button>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-2 text-xs">
+                      {detailData.voteAverage > 0 && (
+                        <span className="bg-amber-500/20 border border-amber-500/40 text-amber-300 font-bold px-3 py-1 rounded-full">
+                          ★ {detailData.voteAverage.toFixed(1)} / 10 Puan
+                        </span>
+                      )}
+                      {detailData.imdbId && (
+                        <a
+                          href={`https://www.imdb.com/title/${detailData.imdbId}`}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="bg-yellow-500 text-black font-black px-2.5 py-1 rounded-full hover:bg-yellow-400 transition"
+                        >
+                          IMDb ↗
+                        </a>
+                      )}
+                      {detailData.mediaType === "movie" &&
+                        formatRuntime(detailData.runtime) && (
+                          <span className="bg-blue-900/40 border border-blue-700/40 text-blue-200 px-3 py-1 rounded-full">
+                            ⏱️ Süre: {formatRuntime(detailData.runtime)}
+                          </span>
+                        )}
+                      {detailData.mediaType === "tv" && (
+                        <span className="bg-purple-900/40 border border-purple-700/40 text-purple-200 px-3 py-1 rounded-full">
+                          📺 {detailData.numberOfSeasons || 1} Sezon •{" "}
+                          {detailData.numberOfEpisodes || "?"} Bölüm
+                        </span>
+                      )}
+                      {detailData.genres && (
+                        <span className="bg-gray-800 text-gray-300 px-3 py-1 rounded-full">
+                          {detailData.genres}
+                        </span>
+                      )}
+                    </div>
+
+                    <div>
+                      <h4 className="text-xs font-bold text-amber-400 uppercase tracking-wider mb-1">
+                        Konusu
+                      </h4>
+                      <p className="text-sm text-gray-200 leading-relaxed">
+                        {detailData.overview}
+                      </p>
+                    </div>
+
+                    {!isGuest && detailRawTmdbItem && (
+                      <div className="flex flex-wrap items-center gap-2 pt-2">
+                        <button
+                          onClick={() =>
+                            handleQuickAddFromTopSearch(detailRawTmdbItem, "personal")
+                          }
+                          className="px-3.5 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-black font-bold text-xs transition"
+                        >
+                          + Kişisel Arşivime Ekle
+                        </button>
+                        <button
+                          onClick={() =>
+                            handleQuickAddFromTopSearch(detailRawTmdbItem, "shared")
+                          }
+                          className="px-3.5 py-1.5 rounded-lg bg-gray-800 hover:bg-gray-700 text-amber-400 border border-amber-500/30 font-semibold text-xs transition"
+                        >
+                          + {selectedGroup} Ortak Arşivine Ekle
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* DİZİ SEZON & TEK TEK BÖLÜMLER */}
+                {detailData.mediaType === "tv" &&
+                  detailData.seasons &&
+                  detailData.seasons.length > 0 && (
+                    <div className="border-t border-gray-800 pt-5 space-y-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <h3 className="text-base font-bold text-amber-400">
+                          📺 Sezonlar & Tek Tek Bölümler
+                        </h3>
+                        <div className="flex flex-wrap gap-1.5">
+                          {detailData.seasons.map((s: any) => (
+                            <button
+                              key={s.id || s.season_number}
+                              onClick={() =>
+                                loadTvSeasonEpisodes(
+                                  detailData.tmdbId,
+                                  s.season_number
+                                )
+                              }
+                              className={`px-3 py-1 rounded-lg text-xs font-bold transition ${
+                                selectedDetailSeason === s.season_number
+                                  ? "bg-amber-500 text-black"
+                                  : "bg-[#0b0f17] text-gray-300 border border-gray-700 hover:border-amber-500/50"
+                              }`}
+                            >
+                              {s.season_number}. Sezon ({s.episode_count} Blm)
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      {loadingEpisodes ? (
+                        <p className="text-xs text-gray-400 py-4">
+                          {selectedDetailSeason}. sezon bölümleri yükleniyor...
+                        </p>
+                      ) : (
+                        <div className="max-h-64 overflow-y-auto space-y-2 pr-1">
+                          {seasonEpisodes.map((ep: any) => (
+                            <div
+                              key={ep.id || ep.episode_number}
+                              className="bg-[#0b0f17] border border-gray-800 rounded-xl p-3 flex flex-col gap-1"
+                            >
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="text-xs font-bold text-white">
+                                  <span className="text-amber-400 mr-1.5">
+                                    {ep.episode_number}. Bölüm:
+                                  </span>
+                                  {ep.name}
+                                </span>
+                                <span className="text-[11px] text-gray-400 flex-shrink-0">
+                                  {ep.runtime ? `${ep.runtime} dk` : ""}{" "}
+                                  {ep.air_date ? `• ${ep.air_date}` : ""}
+                                </span>
+                              </div>
+                              {ep.overview && (
+                                <p className="text-xs text-gray-400 line-clamp-2">
+                                  {ep.overview}
+                                </p>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                {/* GRUPLARDAKİ ÜYELERİN YORUMLARI */}
+                <div className="border-t border-gray-800 pt-5 space-y-4">
+                  <div className="flex items-center justify-between">
+                    <h3 className="text-base font-bold text-white">
+                      💬 Gruplardaki Üyelerin Yorumları ({detailComments.length})
+                    </h3>
+                  </div>
+
+                  {detailComments.length === 0 ? (
+                    <p className="text-xs text-gray-400 bg-[#0b0f17] p-4 rounded-xl border border-gray-800">
+                      Gruplardaki üyeler henüz bu yapım hakkında yorum yazmamış. İlk yorumu aşağıdan sen bırakabilirsin!
+                    </p>
+                  ) : (
+                    <div className="max-h-60 overflow-y-auto space-y-2.5 pr-1">
+                      {detailComments.map((c) => {
+                        const isHidden = c.is_spoiler && !revealedSpoilers[c.id];
+                        return (
+                          <div
+                            key={c.id}
+                            className="bg-[#0b0f17] border border-gray-800 rounded-xl p-3.5"
+                          >
+                            <div className="flex items-center justify-between text-xs text-gray-400 mb-1">
+                              <div className="flex items-center gap-2">
+                                <span className="font-bold text-amber-400">
+                                  {c.username}
+                                </span>
+                                {c.group_name && (
+                                  <span className="bg-gray-800 text-gray-300 px-2 py-0.5 rounded text-[10px]">
+                                    📂 {c.group_name}
+                                  </span>
+                                )}
+                                {(c.season_num || c.episode_num) && (
+                                  <span className="bg-blue-900/40 text-blue-300 border border-blue-700/40 px-2 py-0.5 rounded text-[10px]">
+                                    {c.season_num ? `S${c.season_num}` : ""}
+                                    {c.episode_num ? ` B${c.episode_num}` : ""}
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                            {isHidden ? (
+                              <button
+                                onClick={() =>
+                                  setRevealedSpoilers({
+                                    ...revealedSpoilers,
+                                    [c.id]: true,
+                                  })
+                                }
+                                className="text-xs bg-red-950/60 border border-red-800/60 text-red-300 px-3 py-1 rounded-lg mt-1"
+                              >
+                                ⚠️ Spoiler İçerir (Görmek için tıkla)
+                              </button>
+                            ) : (
+                              <p className="text-sm text-gray-200">{c.content}</p>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  {!isGuest && (
+                    <form
+                      onSubmit={handleAddCommentFromDetail}
+                      className="flex flex-wrap items-center gap-2 pt-1"
+                    >
+                      <input
+                        type="text"
+                        placeholder={`"${detailData.title}" hakkında düşünceni yaz...`}
+                        value={detailCommentText}
+                        onChange={(e) => setDetailCommentText(e.target.value)}
+                        className="flex-1 min-w-[200px] bg-[#0b0f17] border border-gray-700 rounded-xl px-3.5 py-2 text-xs text-white"
+                      />
+                      <label className="flex items-center gap-1 text-xs text-gray-300 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={detailCommentSpoiler}
+                          onChange={(e) =>
+                            setDetailCommentSpoiler(e.target.checked)
+                          }
+                          className="accent-amber-500"
+                        />
+                        Spoiler
+                      </label>
+                      <button
+                        type="submit"
+                        className="bg-amber-500 hover:bg-amber-400 text-black font-bold px-4 py-2 rounded-xl text-xs"
+                      >
+                        Yorum Gönder
+                      </button>
+                    </form>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* DETAYLI EKLEME MODALI */}
       {showAddModal && (
