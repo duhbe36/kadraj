@@ -174,6 +174,7 @@ export default function KadrajApp() {
   const [newPoster, setNewPoster] = useState("");
   const [newYear, setNewYear] = useState("");
   const [newIsLegend, setNewIsLegend] = useState(false);
+  const [newRecommendedBy, setNewRecommendedBy] = useState("");
 
   // Arşiv Filtreleri
   const [searchFilter, setSearchFilter] = useState("");
@@ -432,7 +433,7 @@ export default function KadrajApp() {
             watched: false,
             poster_url: detailData.poster_url || null,
             release_year: detailData.releaseYear || null,
-            owner: currentUser.trim(),
+            owner: newRecommendedBy.trim() || currentUser.trim(),
             is_shared_club: true,
             is_legend: false,
             group_name: selectedGroup,
@@ -1430,6 +1431,19 @@ export default function KadrajApp() {
                           >
                             + {selectedGroup}
                           </button>
+                          <button
+  onClick={() => {
+    selectTmdbItem(r);
+    setNewRecommendedBy(currentUser || "");
+    setAddTarget("shared");
+    setShowAddModal(true);
+    setGlobalSearchQuery("");
+    setGlobalSearchResults([]);
+  }}
+  className="px-2.5 py-1.5 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-200 border border-gray-600 font-semibold text-xs transition"
+>
+  📝 Öneren Seçerek Ekle
+</button>
                           {isFounder && (
                             <button
                               onClick={() =>
@@ -1649,6 +1663,7 @@ export default function KadrajApp() {
                   <button
                     onClick={() => {
                       setAddTarget(activeTab === "shared" ? "shared" : "personal");
+                      setNewRecommendedBy(currentUser || "");
                       setShowAddModal(true);
                     }}
                     className="bg-amber-500 hover:bg-amber-400 text-black font-bold px-5 py-2.5 rounded-xl transition"
@@ -2599,6 +2614,28 @@ export default function KadrajApp() {
                   placeholder="Puan (1-10)"
                 />
               </div>
+              <div>
+  <label className="block text-xs text-gray-400 mb-1">
+    KİM ÖNERDİ?
+  </label>
+  <input
+    type="text"
+    list="recommender-list"
+    placeholder="Öneren kişinin adı (Örn: Duhan, Ahmet...)"
+    value={newRecommendedBy}
+    onChange={(e) => setNewRecommendedBy(e.target.value)}
+    className="w-full bg-[#0b0f17] border border-gray-700 rounded-xl px-4 py-2.5 text-sm text-white"
+  />
+  <datalist id="recommender-list">
+    {Array.from(
+      new Set(
+        [currentUser, ...mediaItems.map((m) => m.owner)].filter(Boolean)
+      )
+    ).map((person) => (
+      <option key={person} value={person} />
+    ))}
+  </datalist>
+</div>
 
               <div className="flex items-center justify-between pt-2">
                 <label className="flex items-center gap-2 text-xs text-gray-300 cursor-pointer">
