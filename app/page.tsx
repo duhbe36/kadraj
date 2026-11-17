@@ -482,6 +482,41 @@ export default function KadrajApp() {
     const normalizedTitle = title.toLowerCase();
     const isShared = mode === "shared";
     const targetGrp = isShared ? selectedGroup : "Kişisel";
+    // Yapım zaten Duhan'ın kişisel arşivinde varsa yeni kayıt açmak yerine mevcut kaydı efsane yap
+    if (mode === "legend") {
+      const existingPersonal = mediaItems.find(
+        (m) =>
+          m.title.trim().toLowerCase() === normalizedTitle &&
+          !m.is_shared_club &&
+          m.owner?.trim().toLowerCase() === currentUser.trim().toLowerCase()
+      );
+
+      if (existingPersonal) {
+        if (existingPersonal.is_legend) {
+          showNotification(`⚠️ "${title}" zaten Efsanelerim vitrininde mevcut!`);
+          return;
+        }
+        const updatedOwner = isFounder ? "Duhan" : existingPersonal.owner;
+        const { error: upErr } = await supabase
+          .from("media_items")
+          .update({ is_legend: true, owner: updatedOwner })
+          .eq("id", existingPersonal.id);
+
+        if (!upErr) {
+          setMediaItems((prev) =>
+            prev.map((m) =>
+              m.id === existingPersonal.id
+                ? { ...m, is_legend: true, owner: updatedOwner }
+                : m
+            )
+          );
+          setGlobalSearchQuery("");
+          setGlobalSearchResults([]);
+          showNotification(`👑 "${title}" -> Kurucunun Efsaneleri vitrinine eklendi!`);
+        }
+        return;
+      }
+    }
 
     const alreadyExists = mediaItems.some((m) => {
       const sameTitle = m.title.trim().toLowerCase() === normalizedTitle;
