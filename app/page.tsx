@@ -1620,7 +1620,7 @@ export default function KadrajApp() {
                   <div className="flex items-center gap-2">
                     <input
                       type="text"
-                      placeholder="Grup Kodu (Örn: KONYA26)"
+                      placeholder=""
                       value={joinGroupCode}
                       onChange={(e) => setJoinGroupCode(e.target.value)}
                       className="bg-[#0b0f17] border border-gray-700 rounded-lg px-3 py-1.5 text-xs text-white uppercase"
