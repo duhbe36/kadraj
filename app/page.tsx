@@ -1569,7 +1569,7 @@ export default function KadrajApp() {
                   </p>
                 </div>
 
-                {isFounder && missingPosterCount > 0 && (
+                {!isGuest && missingPosterCount > 0 && (
                   <button
                     onClick={handleSyncAllPosters}
                     disabled={isSyncingPosters}
@@ -1647,27 +1647,66 @@ export default function KadrajApp() {
                   Henüz diğer üyeler kendi efsane seçkilerini işaretlemedi.
                 </p>
               ) : (
-                <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-5 gap-4">
-                  {memberLegends.map((item) => (
-                    <div
-                      key={item.id}
-                      onClick={() =>
-                        openMediaDetail({
-                          title: item.title,
-                          mediaType: item.category === "Dizi" ? "tv" : undefined,
-                          posterUrl: item.poster_url || item.poster,
-                        })
-                      }
-                      className="bg-[#0b0f17] border border-gray-800 hover:border-amber-500/50 rounded-xl p-3 cursor-pointer transition"
-                    >
-                      <h4 className="font-bold text-sm hover:text-amber-400">
-                        {item.title}
-                      </h4>
-                      <p className="text-xs text-amber-400 mt-1">
-                        ★ {item.rating}/10 ({item.owner})
-                      </p>
-                    </div>
-                  ))}
+                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
+                  {memberLegends.map((item) => {
+                    const posterSrc = item.poster_url || item.poster;
+                    const canRemoveLegend =
+                      !isGuest &&
+                      (isFounder ||
+                        item.owner?.trim().toLowerCase() ===
+                          currentUser?.trim().toLowerCase());
+
+                    return (
+                      <div
+                        key={item.id}
+                        className="bg-[#0b0f17] border border-gray-800 rounded-xl overflow-hidden flex flex-col justify-between group hover:border-amber-500/50 transition"
+                      >
+                        <div
+                          onClick={() =>
+                            openMediaDetail({
+                              title: item.title,
+                              mediaType: item.category === "Dizi" ? "tv" : undefined,
+                              posterUrl: posterSrc,
+                            })
+                          }
+                          className="cursor-pointer"
+                        >
+                          {posterSrc ? (
+                            <img
+                              src={posterSrc}
+                              alt={item.title}
+                              className="w-full h-56 object-cover group-hover:opacity-90 transition"
+                            />
+                          ) : (
+                            <div className="w-full h-56 bg-gray-900 flex items-center justify-center text-gray-500 text-xs">
+                              Afiş Yükleniyor...
+                            </div>
+                          )}
+                          <div className="p-3">
+                            <h4 className="font-bold text-sm text-white group-hover:text-amber-400 line-clamp-1">
+                              {item.title}
+                            </h4>
+                            <p className="text-xs text-amber-400 mt-1">
+                              ★ {item.rating}/10 • {item.category}
+                            </p>
+                            <p className="text-[11px] text-gray-400 mt-0.5">
+                              Seçen: {item.owner}
+                            </p>
+                          </div>
+                        </div>
+                        {canRemoveLegend && (
+                          <div className="p-2 pt-0">
+                            <button
+                              onClick={() => toggleLegendStatus(item)}
+                              className="w-full text-xs bg-red-900/40 hover:bg-red-700 text-red-200 py-1.5 rounded-lg transition"
+                            >
+                              ❌ Efsanelerden Çıkar
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
               )}
             </div>
@@ -1761,7 +1800,7 @@ export default function KadrajApp() {
                 </p>
               </div>
               <div className="flex flex-wrap items-center gap-2">
-                {isFounder && missingPosterCount > 0 && (
+                {!isGuest && missingPosterCount > 0 && (
                   <button
                     onClick={handleSyncAllPosters}
                     disabled={isSyncingPosters}
