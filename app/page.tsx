@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 import { createClient } from "@supabase/supabase-js";
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || "";
@@ -15,7 +15,8 @@ interface MediaItem {
   category: string;
   rating: number;
   watched: boolean;
-  poster_url?: string;
+  poster_url?: string | null;
+  poster?: string | null;
   release_year?: string;
   owner: string;
   is_shared_club: boolean;
@@ -63,6 +64,58 @@ const CATEGORIES = [
   "Dizi",
 ];
 
+// Sansürlü veya bitişik yazılmış başlıklar için TMDB eşleştirme sözlüğü
+const TITLE_ALIASES: Record<string, string> = {
+  "f**** c***": "Fight Club",
+  "fordvferrari": "Ford v Ferrari",
+  "the gentelman": "The Gentlemen",
+  "godfather 1": "The Godfather",
+  "v for vandeta": "V for Vendetta",
+  "bıcaklar cekildi": "Bıçaklar Çekildi",
+  "bicaklar cekildi": "Bıçaklar Çekildi",
+};
+
+const fetchPosterFromTmdb = async (rawTitle: string): Promise<string | null> => {
+  if (!TMDB_API_KEY || !rawTitle) return null;
+  const lower = rawTitle.trim().toLowerCase();
+  const cleanQuery = (TITLE_ALIASES[lower] || rawTitle)
+    .replace(/\(\d{4}\)/g, "")
+    .trim();
+
+  try {
+    const resTr = await fetch(
+      `https://api.themoviedb.org/3/search/multi?api_key=${TMDB_API_KEY}&language=tr-TR&query=${encodeURIComponent(
+        cleanQuery
+      )}`
+    );
+    const dataTr = await resTr.json();
+    const matchTr = (dataTr.results || []).find(
+      (r: any) =>
+        (r.media_type === "movie" || r.media_type === "tv") && r.poster_path
+    );
+    if (matchTr?.poster_path) {
+      return `https://image.tmdb.org/t/p/w500${matchTr.poster_path}`;
+    }
+
+    const resEn = await fetch(
+      `https://api.themoviedb.org/3/search/multi?api_key=${TMDB_API_KEY}&language=en-US&query=${encodeURIComponent(
+        cleanQuery
+      )}`
+    );
+    const dataEn = await resEn.json();
+    const matchEn = (dataEn.results || []).find(
+      (r: any) =>
+        (r.media_type === "movie" || r.media_type === "tv") && r.poster_path
+    );
+    if (matchEn?.poster_path) {
+      return `https://image.tmdb.org/t/p/w500${matchEn.poster_path}`;
+    }
+  } catch (err) {
+    console.error("TMDB afiş hatası:", err);
+  }
+  return null;
+};
+
 export default function KadrajApp() {
   const [currentUser, setCurrentUser] = useState<string | null>(null);
   const [isGuest, setIsGuest] = useState<boolean>(false);
@@ -80,6 +133,11 @@ export default function KadrajApp() {
   const [userGroups, setUserGroups] = useState<string[]>(["Genel Kulüp"]);
   const [selectedGroup, setSelectedGroup] = useState<string>("Genel Kulüp");
   const [joinGroupCode, setJoinGroupCode] = useState("");
+
+  // Afiş senkronizasyon state'leri
+  const [isSyncingPosters, setIsSyncingPosters] = useState(false);
+  const [syncProgress, setSyncProgress] = useState("");
+  const autoSyncedRef = useRef(false);
 
   // Arama & Ekleme State'leri
   const [showAddModal, setShowAddModal] = useState(false);
@@ -128,6 +186,11 @@ export default function KadrajApp() {
     return currentUser?.trim().toLowerCase() === "duhan";
   }, [currentUser]);
 
+  // Eksik afiş sayısı
+  const missingPosterCount = useMemo(() => {
+    return mediaItems.filter((m) => !(m.poster_url || m.poster)).length;
+  }, [mediaItems]);
+
   // İlk Yükleme ve Tek Kullanımlık Misafir Linki Kontrolü
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -150,6 +213,68 @@ export default function KadrajApp() {
       fetchAllData();
     }
   }, [currentUser]);
+
+  // Sayfa açıldığında önce Efsanelerim vitrinindeki eksik afişleri otomatik tamamla
+  useEffect(() => {
+    if (mediaItems.length === 0 || autoSyncedRef.current || !TMDB_API_KEY) return;
+    const legendsWithoutPoster = mediaItems.filter(
+      (m) => m.is_legend && !(m.poster_url || m.poster)
+    );
+    if (legendsWithoutPoster.length === 0) return;
+
+    autoSyncedRef.current = true;
+    (async () => {
+      for (const item of legendsWithoutPoster) {
+        const foundUrl = await fetchPosterFromTmdb(item.title);
+        if (foundUrl) {
+          await supabase
+            .from("media_items")
+            .update({ poster_url: foundUrl })
+            .eq("id", item.id);
+          setMediaItems((prev) =>
+            prev.map((m) => (m.id === item.id ? { ...m, poster_url: foundUrl } : m))
+          );
+        }
+      }
+    })();
+  }, [mediaItems]);
+
+  // Tüm eksik afişleri toplu çekme fonksiyonu
+  const handleSyncAllPosters = async () => {
+    if (isSyncingPosters || !TMDB_API_KEY) return;
+    const missing = mediaItems.filter((m) => !(m.poster_url || m.poster));
+    if (missing.length === 0) {
+      alert("Tüm yapımların afişleri zaten yüklü!");
+      return;
+    }
+
+    setIsSyncingPosters(true);
+    let completed = 0;
+
+    for (let i = 0; i < missing.length; i += 5) {
+      const batch = missing.slice(i, i + 5);
+      await Promise.all(
+        batch.map(async (item) => {
+          const url = await fetchPosterFromTmdb(item.title);
+          if (url) {
+            await supabase
+              .from("media_items")
+              .update({ poster_url: url })
+              .eq("id", item.id);
+            setMediaItems((prev) =>
+              prev.map((m) => (m.id === item.id ? { ...m, poster_url: url } : m))
+            );
+          }
+          completed += 1;
+          setSyncProgress(`${completed} / ${missing.length}`);
+        })
+      );
+      await new Promise((r) => setTimeout(r, 250));
+    }
+
+    setIsSyncingPosters(false);
+    setSyncProgress("");
+  };
 
   const handleGuestLinkLogin = async (code: string) => {
     const { data, error } = await supabase
@@ -205,7 +330,6 @@ export default function KadrajApp() {
           if (g.group_name) groups.add(g.group_name);
         });
       }
-      // Kurucu tüm grupları görebilir
       if (currentUser.trim().toLowerCase() === "duhan" && iData) {
         iData.forEach((inv: any) => {
           if (inv.group_name) groups.add(inv.group_name);
@@ -353,7 +477,7 @@ export default function KadrajApp() {
     setTmdbQuery("");
   };
 
-  // Film / Dizi Ekleme (Mükerrer / Çift Kayıt Engelli)
+  // Film / Dizi Ekleme (Mükerrer / Çift Kayıt Engelli + Otomatik Afiş)
   const handleAddMedia = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newTitle.trim() || !currentUser || isGuest) return;
@@ -362,7 +486,6 @@ export default function KadrajApp() {
     const isShared = addTarget === "shared";
     const targetGrp = isShared ? selectedGroup : "Kişisel";
 
-    // Çift ekleme kontrolü
     const alreadyExists = mediaItems.some((m) => {
       const sameTitle = m.title.trim().toLowerCase() === normalizedTitle;
       if (!sameTitle) return false;
@@ -381,12 +504,17 @@ export default function KadrajApp() {
       return;
     }
 
+    let finalPoster = newPoster;
+    if (!finalPoster) {
+      finalPoster = (await fetchPosterFromTmdb(newTitle.trim())) || "";
+    }
+
     const payload = {
       title: newTitle.trim(),
       category: newCategory,
       rating: newRating,
       watched: newWatched,
-      poster_url: newPoster || null,
+      poster_url: finalPoster || null,
       release_year: newYear || null,
       owner: currentUser.trim(),
       is_shared_club: isShared,
@@ -478,7 +606,7 @@ export default function KadrajApp() {
     );
   }, [mediaItems, discussionSearch]);
 
-  // Seçili Filmin Tüm ID Eşleşmeleri (3 farklı kayıt olsa bile yorumları tek yerde toplar)
+  // Seçili Filmin Tüm ID Eşleşmeleri
   const selectedMovieIds = useMemo(() => {
     if (!selectedDiscussionTitle) return [];
     const targetKey = selectedDiscussionTitle.trim().toLowerCase();
@@ -543,9 +671,13 @@ export default function KadrajApp() {
 
         if (candidates.length > 0) {
           const picked = candidates[Math.floor(Math.random() * candidates.length)];
+          let poster = picked.poster_url || picked.poster || "";
+          if (!poster) {
+            poster = (await fetchPosterFromTmdb(picked.title)) || "";
+          }
           setWheelResult({
             title: picked.title,
-            poster_url: picked.poster_url,
+            poster_url: poster,
             release_year: picked.release_year,
             rating: picked.rating,
             category: picked.category,
@@ -560,7 +692,6 @@ export default function KadrajApp() {
         }
         setIsSpinning(false);
       } else {
-        // TMDB Akıllı Keşif
         try {
           const watchedTitles = new Set(
             groupItems.map((m) => m.title.trim().toLowerCase())
@@ -645,7 +776,7 @@ export default function KadrajApp() {
     }
   };
 
-  // Efsanelerim Listesi Ayrımı (Kurucunun Efsaneleri vs Üyelerin Efsaneleri)
+  // Efsanelerim Listesi Ayrımı
   const founderLegends = useMemo(() => {
     const seen = new Set<string>();
     return mediaItems.filter((m) => {
@@ -866,47 +997,62 @@ export default function KadrajApp() {
                       : "Kulüp kurucusu Duhan tarafından seçilen başyapıtlar."}
                   </p>
                 </div>
+
+                {isFounder && missingPosterCount > 0 && (
+                  <button
+                    onClick={handleSyncAllPosters}
+                    disabled={isSyncingPosters}
+                    className="bg-amber-500 hover:bg-amber-400 text-black font-bold px-4 py-2 rounded-xl text-xs transition"
+                  >
+                    {isSyncingPosters
+                      ? `🖼️ Afişler Çekiliyor (${syncProgress})...`
+                      : `🖼️ Eksik Afişleri Tamamla (${missingPosterCount})`}
+                  </button>
+                )}
               </div>
 
               <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
-                {founderLegends.map((item) => (
-                  <div
-                    key={item.id}
-                    className="bg-[#0b0f17] border border-gray-800 rounded-xl overflow-hidden flex flex-col justify-between group hover:border-amber-500/50 transition"
-                  >
-                    <div>
-                      {item.poster_url ? (
-                        <img
-                          src={item.poster_url}
-                          alt={item.title}
-                          className="w-full h-56 object-cover"
-                        />
-                      ) : (
-                        <div className="w-full h-56 bg-gray-900 flex items-center justify-center text-gray-600 text-xs">
-                          Afiş Yok
+                {founderLegends.map((item) => {
+                  const posterSrc = item.poster_url || item.poster;
+                  return (
+                    <div
+                      key={item.id}
+                      className="bg-[#0b0f17] border border-gray-800 rounded-xl overflow-hidden flex flex-col justify-between group hover:border-amber-500/50 transition"
+                    >
+                      <div>
+                        {posterSrc ? (
+                          <img
+                            src={posterSrc}
+                            alt={item.title}
+                            className="w-full h-56 object-cover"
+                          />
+                        ) : (
+                          <div className="w-full h-56 bg-gray-900 flex items-center justify-center text-gray-500 text-xs">
+                            Afiş Yükleniyor...
+                          </div>
+                        )}
+                        <div className="p-3">
+                          <h3 className="font-bold text-sm text-white line-clamp-1">
+                            {item.title}
+                          </h3>
+                          <p className="text-xs text-amber-400 mt-1">
+                            ★ {item.rating}/10 • {item.category}
+                          </p>
+                        </div>
+                      </div>
+                      {isFounder && (
+                        <div className="p-2 pt-0">
+                          <button
+                            onClick={() => toggleLegendStatus(item)}
+                            className="w-full text-xs bg-red-900/40 hover:bg-red-700 text-red-200 py-1.5 rounded-lg transition"
+                          >
+                            ❌ Efsanelerden Çıkar
+                          </button>
                         </div>
                       )}
-                      <div className="p-3">
-                        <h3 className="font-bold text-sm text-white line-clamp-1">
-                          {item.title}
-                        </h3>
-                        <p className="text-xs text-amber-400 mt-1">
-                          ★ {item.rating}/10 • {item.category}
-                        </p>
-                      </div>
                     </div>
-                    {isFounder && (
-                      <div className="p-2 pt-0">
-                        <button
-                          onClick={() => toggleLegendStatus(item)}
-                          className="w-full text-xs bg-red-900/40 hover:bg-red-700 text-red-200 py-1.5 rounded-lg transition"
-                        >
-                          ❌ Efsanelerden Çıkar
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
 
@@ -943,7 +1089,6 @@ export default function KadrajApp() {
         {/* 2. GRUP ORTAK ARŞİVİ VEYA KİŞİSEL ARŞİV */}
         {(activeTab === "shared" || activeTab === "personal") && (
           <div className="space-y-6">
-            {/* Grup Seçici Bar (Sadece Ortak Arşivde) */}
             {activeTab === "shared" && (
               <div className="bg-[#131b2e] border border-gray-800 rounded-2xl p-4 flex flex-wrap items-center justify-between gap-4">
                 <div className="flex flex-wrap items-center gap-2">
@@ -983,7 +1128,6 @@ export default function KadrajApp() {
               </div>
             )}
 
-            {/* Başlık ve Yeni Yapım Ekle Butonu */}
             <div className="bg-[#131b2e] border border-gray-800 rounded-2xl p-6 flex flex-wrap items-center justify-between gap-4">
               <div>
                 <h2 className="text-2xl font-bold text-amber-500">
@@ -997,22 +1141,34 @@ export default function KadrajApp() {
                     : "Bu liste sadece sana özeldir. İstediğin yapımı ekleyip çıkarabilirsin."}
                 </p>
               </div>
-              {!isGuest && (
-                <button
-                  onClick={() => {
-                    setAddTarget(activeTab === "shared" ? "shared" : "personal");
-                    setShowAddModal(true);
-                  }}
-                  className="bg-amber-500 hover:bg-amber-400 text-black font-bold px-5 py-2.5 rounded-xl transition"
-                >
-                  {activeTab === "shared"
-                    ? `+ ${selectedGroup} Listesine Ekle`
-                    : "+ Kişisel Listeme Ekle"}
-                </button>
-              )}
+              <div className="flex flex-wrap items-center gap-2">
+                {isFounder && missingPosterCount > 0 && (
+                  <button
+                    onClick={handleSyncAllPosters}
+                    disabled={isSyncingPosters}
+                    className="bg-gray-800 hover:bg-gray-700 text-amber-400 border border-amber-500/40 font-bold px-4 py-2.5 rounded-xl text-xs transition"
+                  >
+                    {isSyncingPosters
+                      ? `🖼️ Afişler Çekiliyor (${syncProgress})...`
+                      : `🖼️ Eksik Afişleri Tamamla (${missingPosterCount})`}
+                  </button>
+                )}
+                {!isGuest && (
+                  <button
+                    onClick={() => {
+                      setAddTarget(activeTab === "shared" ? "shared" : "personal");
+                      setShowAddModal(true);
+                    }}
+                    className="bg-amber-500 hover:bg-amber-400 text-black font-bold px-5 py-2.5 rounded-xl transition"
+                  >
+                    {activeTab === "shared"
+                      ? `+ ${selectedGroup} Listesine Ekle`
+                      : "+ Kişisel Listeme Ekle"}
+                  </button>
+                )}
+              </div>
             </div>
 
-            {/* Arama ve Kategori Filtreleri */}
             <div className="flex flex-wrap gap-3">
               <input
                 type="text"
@@ -1044,9 +1200,9 @@ export default function KadrajApp() {
               </select>
             </div>
 
-            {/* Film & Dizi Kartları (Silme ve Kurucu Efsanesi Butonlu) */}
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
               {displayedMedia.map((item) => {
+                const posterSrc = item.poster_url || item.poster;
                 const canDelete =
                   !isGuest &&
                   (isFounder ||
@@ -1059,9 +1215,9 @@ export default function KadrajApp() {
                     className="bg-[#131b2e] border border-gray-800 rounded-xl p-4 flex items-center justify-between gap-4 hover:border-gray-700 transition"
                   >
                     <div className="flex items-center gap-3.5 min-w-0">
-                      {item.poster_url ? (
+                      {posterSrc ? (
                         <img
-                          src={item.poster_url}
+                          src={posterSrc}
                           alt={item.title}
                           className="w-14 h-20 object-cover rounded-lg flex-shrink-0"
                         />
@@ -1126,7 +1282,7 @@ export default function KadrajApp() {
           </div>
         )}
 
-        {/* 3. BUGÜN NE İZLESEK? (AKILLI GRUP ÖNERİ MOTORU) */}
+        {/* 3. BUGÜN NE İZLESEK? */}
         {activeTab === "whatToWatch" && (
           <div className="max-w-3xl mx-auto bg-[#131b2e] border border-gray-800 rounded-2xl p-6 space-y-6">
             <div>
@@ -1234,7 +1390,7 @@ export default function KadrajApp() {
           </div>
         )}
 
-        {/* 4. TARTIŞMA ODALARI (MÜKERRER FİLMLER BİRLEŞTİRİLDİ + DİZİ SEZON/BÖLÜM YORUMU) */}
+        {/* 4. TARTIŞMA ODALARI */}
         {activeTab === "discussions" && (
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
             <div className="bg-[#131b2e] border border-gray-800 rounded-2xl p-4 h-[620px] flex flex-col">
@@ -1290,7 +1446,6 @@ export default function KadrajApp() {
                       </p>
                     </div>
 
-                    {/* Sezon / Bölüm Filtresi */}
                     <div className="flex items-center gap-2">
                       <select
                         value={filterSeason}
@@ -1327,7 +1482,6 @@ export default function KadrajApp() {
                     </div>
                   </div>
 
-                  {/* Yorum Listesi */}
                   <div className="flex-1 overflow-y-auto space-y-3 pr-2 mb-4">
                     {comments
                       .filter((c) => selectedMovieIds.includes(String(c.media_id)))
@@ -1390,7 +1544,6 @@ export default function KadrajApp() {
                       })}
                   </div>
 
-                  {/* Yorum Yazma Formu */}
                   {!isGuest && (
                     <form onSubmit={handleAddComment} className="space-y-2.5">
                       {replyToId && (
@@ -1558,7 +1711,6 @@ export default function KadrajApp() {
               </button>
             </div>
 
-            {/* TMDB Arama */}
             <div className="relative">
               <input
                 type="text"
