@@ -137,10 +137,11 @@ export default function KadrajApp() {
   const [comments, setComments] = useState<CommentItem[]>([]);
   const [invites, setInvites] = useState<InviteItem[]>([]);
   const [userGroups, setUserGroups] = useState<string[]>(["Genel Kulüp"]);
+  const [allGroupMembers, setAllGroupMembers] = useState<any[]>([]);
   const [selectedGroup, setSelectedGroup] = useState<string>("Genel Kulüp");
   const [joinGroupCode, setJoinGroupCode] = useState("");
 
-  // Her Zaman Görünür Üst TMDB Hızlı Arama State'leri
+  // Üst Canlı TMDB Hızlı Arama State'leri
   const [globalSearchQuery, setGlobalSearchQuery] = useState("");
   const [globalSearchResults, setGlobalSearchResults] = useState<any[]>([]);
   const [isSearchingGlobal, setIsSearchingGlobal] = useState(false);
@@ -157,7 +158,7 @@ export default function KadrajApp() {
   const [detailCommentText, setDetailCommentText] = useState("");
   const [detailCommentSpoiler, setDetailCommentSpoiler] = useState(false);
 
-  // Afiş senkronizasyon state'leri
+  // Afiş Senkronizasyon State'leri
   const [isSyncingPosters, setIsSyncingPosters] = useState(false);
   const [syncProgress, setSyncProgress] = useState("");
   const autoSyncedRef = useRef(false);
@@ -240,7 +241,7 @@ export default function KadrajApp() {
     }
   }, [currentUser]);
 
-  // Üst Global TMDB Arama Çubuğu Efekti
+  // Üst Global TMDB Arama Çubuğu
   useEffect(() => {
     const timer = setTimeout(async () => {
       if (globalSearchQuery.trim().length < 2) {
@@ -433,7 +434,7 @@ export default function KadrajApp() {
             watched: false,
             poster_url: detailData.poster_url || null,
             release_year: detailData.releaseYear || null,
-            owner: newRecommendedBy.trim() || currentUser.trim(),
+            owner: currentUser.trim(),
             is_shared_club: true,
             is_legend: false,
             group_name: selectedGroup,
@@ -653,14 +654,21 @@ export default function KadrajApp() {
     if (currentUser) {
       const { data: gData } = await supabase
         .from("user_groups")
-        .select("group_name")
-        .ilike("username", currentUser.trim());
+        .select("*");
+
+      if (gData) setAllGroupMembers(gData);
 
       const groups = new Set<string>(["Genel Kulüp"]);
       if (gData) {
-        gData.forEach((g: any) => {
-          if (g.group_name) groups.add(g.group_name);
-        });
+        gData
+          .filter(
+            (g: any) =>
+              g.username?.trim().toLowerCase() ===
+              currentUser.trim().toLowerCase()
+          )
+          .forEach((g: any) => {
+            if (g.group_name) groups.add(g.group_name);
+          });
       }
       if (currentUser.trim().toLowerCase() === "duhan" && iData) {
         iData.forEach((inv: any) => {
@@ -757,6 +765,31 @@ export default function KadrajApp() {
     showNotification(`✅ "${inv.group_name}" grubuna başarıyla katıldın!`);
   };
 
+  const handleRemoveGroupMember = async (memberName: string) => {
+    if (!isFounder || memberName.toLowerCase() === "duhan") return;
+    const confirmed = window.confirm(
+      `"${memberName}" kullanıcısını "${selectedGroup}" grubundan çıkarmak istediğinize emin misiniz?`
+    );
+    if (!confirmed) return;
+
+    await supabase
+      .from("user_groups")
+      .delete()
+      .ilike("username", memberName)
+      .eq("group_name", selectedGroup);
+
+    setAllGroupMembers((prev) =>
+      prev.filter(
+        (item) =>
+          !(
+            item.username?.trim().toLowerCase() === memberName.toLowerCase() &&
+            (item.group_name || "Genel Kulüp") === selectedGroup
+          )
+      )
+    );
+    showNotification(`🗑️ ${memberName}, ${selectedGroup} grubundan çıkarıldı.`);
+  };
+
   useEffect(() => {
     const timer = setTimeout(async () => {
       if (tmdbQuery.trim().length < 2 || !TMDB_API_KEY) {
@@ -844,7 +877,7 @@ export default function KadrajApp() {
       watched: newWatched,
       poster_url: finalPoster || null,
       release_year: newYear || null,
-      owner: currentUser.trim(),
+      owner: newRecommendedBy.trim() || currentUser.trim(),
       is_shared_club: isShared,
       is_legend: newIsLegend,
       group_name: targetGrp,
@@ -1148,6 +1181,18 @@ export default function KadrajApp() {
     });
   }, [mediaItems, selectedMemberLegend]);
 
+  // Seçili Grubun Tekil Üye Listesi
+  const currentGroupMembers = useMemo(() => {
+    return Array.from(
+      new Map(
+        allGroupMembers
+          .filter((m) => (m.group_name || "Genel Kulüp") === selectedGroup)
+          .map((m) => [m.username.trim().toLowerCase(), m.username.trim()])
+      ).values()
+    );
+  }, [allGroupMembers, selectedGroup]);
+
+  // Giriş Ekranı ("Örn:" metinleri kaldırıldı)
   if (!currentUser) {
     return (
       <div className="min-h-screen bg-[#0b0f17] text-white flex items-center justify-center p-4">
@@ -1172,7 +1217,7 @@ export default function KadrajApp() {
               </label>
               <input
                 type="text"
-                placeholder=""
+                placeholder="Kullanıcı adınız"
                 value={loginName}
                 onChange={(e) => setLoginName(e.target.value)}
                 className="w-full bg-[#0b0f17] border border-gray-700 rounded-lg px-4 py-3 text-white focus:border-amber-500 outline-none"
@@ -1184,7 +1229,7 @@ export default function KadrajApp() {
               </label>
               <input
                 type="text"
-                placeholder=""
+                placeholder="Davet kodunuz"
                 value={inviteCodeInput}
                 onChange={(e) => setInviteCodeInput(e.target.value)}
                 className="w-full bg-[#0b0f17] border border-gray-700 rounded-lg px-4 py-3 text-white uppercase focus:border-amber-500 outline-none"
@@ -1432,18 +1477,18 @@ export default function KadrajApp() {
                             + {selectedGroup}
                           </button>
                           <button
-  onClick={() => {
-    selectTmdbItem(r);
-    setNewRecommendedBy(currentUser || "");
-    setAddTarget("shared");
-    setShowAddModal(true);
-    setGlobalSearchQuery("");
-    setGlobalSearchResults([]);
-  }}
-  className="px-2.5 py-1.5 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-200 border border-gray-600 font-semibold text-xs transition"
->
-  📝 Öneren Seçerek Ekle
-</button>
+                            onClick={() => {
+                              selectTmdbItem(r);
+                              setNewRecommendedBy(currentUser || "");
+                              setAddTarget("shared");
+                              setShowAddModal(true);
+                              setGlobalSearchQuery("");
+                              setGlobalSearchResults([]);
+                            }}
+                            className="px-2.5 py-1.5 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-200 border border-gray-600 font-semibold text-xs transition"
+                          >
+                            📝 Öneren Seçerek Ekle
+                          </button>
                           {isFounder && (
                             <button
                               onClick={() =>
@@ -1598,42 +1643,75 @@ export default function KadrajApp() {
         {(activeTab === "shared" || activeTab === "personal") && (
           <div className="space-y-6">
             {activeTab === "shared" && (
-              <div className="bg-[#131b2e] border border-gray-800 rounded-2xl p-4 flex flex-wrap items-center justify-between gap-4">
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="text-xs text-gray-400 mr-2">AKTİF GRUP ODASI:</span>
-                  {userGroups.map((grp) => (
-                    <button
-                      key={grp}
-                      onClick={() => setSelectedGroup(grp)}
-                      className={`px-3 py-1.5 rounded-lg text-xs font-bold transition ${
-                        selectedGroup === grp
-                          ? "bg-amber-500 text-black"
-                          : "bg-[#0b0f17] text-gray-300 border border-gray-700"
-                      }`}
-                    >
-                      📂 {grp}
-                    </button>
-                  ))}
+              <>
+                <div className="bg-[#131b2e] border border-gray-800 rounded-2xl p-4 flex flex-wrap items-center justify-between gap-4">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-xs text-gray-400 mr-2">AKTİF GRUP ODASI:</span>
+                    {userGroups.map((grp) => (
+                      <button
+                        key={grp}
+                        onClick={() => setSelectedGroup(grp)}
+                        className={`px-3 py-1.5 rounded-lg text-xs font-bold transition ${
+                          selectedGroup === grp
+                            ? "bg-amber-500 text-black"
+                            : "bg-[#0b0f17] text-gray-300 border border-gray-700"
+                        }`}
+                      >
+                        📂 {grp}
+                      </button>
+                    ))}
+                  </div>
+
+                  {!isGuest && (
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="text"
+                        placeholder="Grup Kodu"
+                        value={joinGroupCode}
+                        onChange={(e) => setJoinGroupCode(e.target.value)}
+                        className="bg-[#0b0f17] border border-gray-700 rounded-lg px-3 py-1.5 text-xs text-white uppercase"
+                      />
+                      <button
+                        onClick={handleJoinNewGroup}
+                        className="bg-gray-800 hover:bg-gray-700 text-amber-400 text-xs font-semibold px-3 py-1.5 rounded-lg border border-gray-700"
+                      >
+                        + Gruba Katıl
+                      </button>
+                    </div>
+                  )}
                 </div>
 
-                {!isGuest && (
-                  <div className="flex items-center gap-2">
-                    <input
-                      type="text"
-                      placeholder=""
-                      value={joinGroupCode}
-                      onChange={(e) => setJoinGroupCode(e.target.value)}
-                      className="bg-[#0b0f17] border border-gray-700 rounded-lg px-3 py-1.5 text-xs text-white uppercase"
-                    />
-                    <button
-                      onClick={handleJoinNewGroup}
-                      className="bg-gray-800 hover:bg-gray-700 text-amber-400 text-xs font-semibold px-3 py-1.5 rounded-lg border border-gray-700"
-                    >
-                      + Gruba Katıl
-                    </button>
-                  </div>
-                )}
-              </div>
+                {/* SEÇİLİ GRUPTAKİ ÜYELER LİSTESİ */}
+                <div className="bg-[#131b2e] border border-gray-800 rounded-2xl px-4 py-3 flex flex-wrap items-center gap-2">
+                  <span className="text-xs text-gray-400 mr-1">
+                    👥 {selectedGroup.toUpperCase()} ÜYELERİ ({currentGroupMembers.length}):
+                  </span>
+                  {currentGroupMembers.length === 0 ? (
+                    <span className="text-xs text-gray-500">
+                      Henüz kayıtlı üye görünmüyor.
+                    </span>
+                  ) : (
+                    currentGroupMembers.map((memberName) => (
+                      <span
+                        key={memberName}
+                        className="inline-flex items-center gap-1.5 bg-[#0b0f17] border border-gray-700 text-gray-200 text-xs px-3 py-1 rounded-full"
+                      >
+                        {memberName.toLowerCase() === "duhan" ? "👑" : "👤"}{" "}
+                        {memberName}
+                        {isFounder && memberName.toLowerCase() !== "duhan" && (
+                          <button
+                            onClick={() => handleRemoveGroupMember(memberName)}
+                            title="Üyeyi gruptan çıkar"
+                            className="text-red-400 hover:text-red-300 ml-1 font-bold"
+                          >
+                            ✕
+                          </button>
+                        )}
+                      </span>
+                    ))
+                  )}
+                </div>
+              </>
             )}
 
             <div className="bg-[#131b2e] border border-gray-800 rounded-2xl p-6 flex flex-wrap items-center justify-between gap-4">
@@ -2163,7 +2241,7 @@ export default function KadrajApp() {
                 🔑 Çoklu Grup & Davet Kodu Yönetimi
               </h2>
               <p className="text-gray-400 text-sm mt-1">
-                Arkadaş çevrene özel yeni bir grup adı yazarak (Örn: Konya Grubu) davet kodu üretebilir veya kullanılmış kodları sağdaki çöp kutusuyla silebilirsin.
+                Arkadaş çevrene özel yeni bir grup adı yazarak davet kodu üretebilir veya kullanılmış kodları sağdaki çöp kutusuyla silebilirsin.
               </p>
             </div>
 
@@ -2174,7 +2252,7 @@ export default function KadrajApp() {
                 </label>
                 <input
                   type="text"
-                  placeholder="Örn: Konya Grubu"
+                  placeholder="Grup adı yazın"
                   value={newInviteGroupName}
                   onChange={(e) => setNewInviteGroupName(e.target.value)}
                   className="w-full bg-[#131b2e] border border-gray-700 rounded-lg px-3.5 py-2 text-sm text-white"
@@ -2526,7 +2604,7 @@ export default function KadrajApp() {
         </div>
       )}
 
-      {/* DETAYLI EKLEME MODALI */}
+      {/* DETAYLI EKLEME MODALI ("KİM ÖNERDİ?" ALANI DAHİL) */}
       {showAddModal && (
         <div className="fixed inset-0 bg-black/75 flex items-center justify-center p-4 z-50">
           <div className="bg-[#131b2e] border border-gray-700 rounded-2xl max-w-lg w-full p-6 space-y-4">
@@ -2614,28 +2692,31 @@ export default function KadrajApp() {
                   placeholder="Puan (1-10)"
                 />
               </div>
+
               <div>
-  <label className="block text-xs text-gray-400 mb-1">
-    KİM ÖNERDİ?
-  </label>
-  <input
-    type="text"
-    list="recommender-list"
-    placeholder="Öneren kişinin adı (Örn: Duhan, Ahmet...)"
-    value={newRecommendedBy}
-    onChange={(e) => setNewRecommendedBy(e.target.value)}
-    className="w-full bg-[#0b0f17] border border-gray-700 rounded-xl px-4 py-2.5 text-sm text-white"
-  />
-  <datalist id="recommender-list">
-    {Array.from(
-      new Set(
-        [currentUser, ...mediaItems.map((m) => m.owner)].filter(Boolean)
-      )
-    ).map((person) => (
-      <option key={person} value={person} />
-    ))}
-  </datalist>
-</div>
+                <label className="block text-xs text-gray-400 mb-1">
+                  KİM ÖNERDİ?
+                </label>
+                <input
+                  type="text"
+                  list="recommender-list"
+                  placeholder="Öneren kişinin adı"
+                  value={newRecommendedBy}
+                  onChange={(e) => setNewRecommendedBy(e.target.value)}
+                  className="w-full bg-[#0b0f17] border border-gray-700 rounded-xl px-4 py-2.5 text-sm text-white"
+                />
+                <datalist id="recommender-list">
+                  {Array.from(
+                    new Set(
+                      [currentUser, ...mediaItems.map((m) => m.owner)].filter(
+                        Boolean
+                      )
+                    )
+                  ).map((person) => (
+                    <option key={person} value={person} />
+                  ))}
+                </datalist>
+              </div>
 
               <div className="flex items-center justify-between pt-2">
                 <label className="flex items-center gap-2 text-xs text-gray-300 cursor-pointer">
