@@ -64,7 +64,6 @@ const CATEGORIES = [
   "Dizi",
 ];
 
-// Sansürlü veya bitişik yazılmış başlıklar için TMDB eşleştirme sözlüğü
 const TITLE_ALIASES: Record<string, string> = {
   "f**** c***": "Fight Club",
   "fordvferrari": "Ford v Ferrari",
@@ -134,12 +133,18 @@ export default function KadrajApp() {
   const [selectedGroup, setSelectedGroup] = useState<string>("Genel Kulüp");
   const [joinGroupCode, setJoinGroupCode] = useState("");
 
+  // Her Zaman Görünür Üst TMDB Hızlı Arama State'leri
+  const [globalSearchQuery, setGlobalSearchQuery] = useState("");
+  const [globalSearchResults, setGlobalSearchResults] = useState<any[]>([]);
+  const [isSearchingGlobal, setIsSearchingGlobal] = useState(false);
+  const [quickToast, setQuickToast] = useState<string>("");
+
   // Afiş senkronizasyon state'leri
   const [isSyncingPosters, setIsSyncingPosters] = useState(false);
   const [syncProgress, setSyncProgress] = useState("");
   const autoSyncedRef = useRef(false);
 
-  // Arama & Ekleme State'leri
+  // Modal Arama & Ekleme State'leri
   const [showAddModal, setShowAddModal] = useState(false);
   const [addTarget, setAddTarget] = useState<"personal" | "shared">("personal");
   const [tmdbQuery, setTmdbQuery] = useState("");
@@ -152,7 +157,7 @@ export default function KadrajApp() {
   const [newYear, setNewYear] = useState("");
   const [newIsLegend, setNewIsLegend] = useState(false);
 
-  // Filtreler
+  // Arşiv Filtreleri
   const [searchFilter, setSearchFilter] = useState("");
   const [categoryFilter, setCategoryFilter] = useState("Tümü");
   const [watchedFilter, setWatchedFilter] = useState<"all" | "watched" | "unwatched">("all");
@@ -181,17 +186,19 @@ export default function KadrajApp() {
   // Davet Kodu Üretme State'i
   const [newInviteGroupName, setNewInviteGroupName] = useState("Genel Kulüp");
 
-  // Kurucu kontrolü (Duhan)
   const isFounder = useMemo(() => {
     return currentUser?.trim().toLowerCase() === "duhan";
   }, [currentUser]);
 
-  // Eksik afiş sayısı
   const missingPosterCount = useMemo(() => {
     return mediaItems.filter((m) => !(m.poster_url || m.poster)).length;
   }, [mediaItems]);
 
-  // İlk Yükleme ve Tek Kullanımlık Misafir Linki Kontrolü
+  const showNotification = (msg: string) => {
+    setQuickToast(msg);
+    setTimeout(() => setQuickToast(""), 3500);
+  };
+
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const guestCode = params.get("guest");
@@ -214,7 +221,117 @@ export default function KadrajApp() {
     }
   }, [currentUser]);
 
-  // Sayfa açıldığında önce Efsanelerim vitrinindeki eksik afişleri otomatik tamamla
+  // Üst Global TMDB Arama Çubuğu Efekti
+  useEffect(() => {
+    const timer = setTimeout(async () => {
+      if (globalSearchQuery.trim().length < 2) {
+        setGlobalSearchResults([]);
+        return;
+      }
+      if (!TMDB_API_KEY) {
+        return;
+      }
+      setIsSearchingGlobal(true);
+      try {
+        const res = await fetch(
+          `https://api.themoviedb.org/3/search/multi?api_key=${TMDB_API_KEY}&language=tr-TR&query=${encodeURIComponent(
+            globalSearchQuery
+          )}`
+        );
+        const data = await res.json();
+        setGlobalSearchResults(
+          (data.results || [])
+            .filter((r: any) => r.media_type === "movie" || r.media_type === "tv")
+            .slice(0, 8)
+        );
+      } catch (err) {
+        console.error(err);
+      } finally {
+        setIsSearchingGlobal(false);
+      }
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [globalSearchQuery]);
+
+  // Üst Arama Çubuğundan Tek Tıkla Ekleme
+  const handleQuickAddFromTopSearch = async (
+    item: any,
+    mode: "personal" | "shared" | "legend"
+  ) => {
+    if (!currentUser || isGuest) return;
+    const title = (item.title || item.name || "").trim();
+    if (!title) return;
+
+    const normalizedTitle = title.toLowerCase();
+    const isShared = mode === "shared";
+    const targetGrp = isShared ? selectedGroup : "Kişisel";
+
+    const alreadyExists = mediaItems.some((m) => {
+      const sameTitle = m.title.trim().toLowerCase() === normalizedTitle;
+      if (!sameTitle) return false;
+      if (isShared) {
+        return m.is_shared_club && (m.group_name || "Genel Kulüp") === selectedGroup;
+      } else {
+        return (
+          !m.is_shared_club &&
+          m.owner?.trim().toLowerCase() === currentUser.trim().toLowerCase()
+        );
+      }
+    });
+
+    if (alreadyExists) {
+      showNotification(`⚠️ "${title}" zaten seçilen listede mevcut!`);
+      return;
+    }
+
+    const year = (item.release_date || item.first_air_date || "").slice(0, 4);
+    const poster = item.poster_path
+      ? `https://image.tmdb.org/t/p/w500${item.poster_path}`
+      : null;
+    const isTv = item.media_type === "tv";
+    const isTr = item.original_language === "tr";
+    const category = isTv ? "Dizi" : isTr ? "Türk Dram" : "Yabancı Dram";
+    const rating = item.vote_average ? Math.max(1, Math.round(item.vote_average)) : 8;
+
+    const payload = {
+      title,
+      category,
+      rating,
+      watched: false,
+      poster_url: poster,
+      release_year: year || null,
+      owner: mode === "legend" && isFounder ? "Duhan" : currentUser.trim(),
+      is_shared_club: isShared,
+      is_legend: mode === "legend",
+      group_name: targetGrp,
+    };
+
+    const { data, error } = await supabase
+      .from("media_items")
+      .insert([payload])
+      .select()
+      .single();
+
+    if (error) {
+      alert("Ekleme hatası: " + error.message);
+      return;
+    }
+
+    if (data) {
+      setMediaItems([data, ...mediaItems]);
+      setGlobalSearchQuery("");
+      setGlobalSearchResults([]);
+      if (mode === "shared") {
+        showNotification(`✅ "${title}" -> ${selectedGroup} Ortak Arşivine eklendi!`);
+      } else if (mode === "legend") {
+        showNotification(`👑 "${title}" -> Kurucunun Efsaneleri vitrinine eklendi!`);
+      } else {
+        showNotification(`✅ "${title}" -> Kişisel Arşivine eklendi!`);
+      }
+    }
+  };
+
+  // Efsanelerim vitrinindeki eksik afişleri otomatik tamamla
   useEffect(() => {
     if (mediaItems.length === 0 || autoSyncedRef.current || !TMDB_API_KEY) return;
     const legendsWithoutPoster = mediaItems.filter(
@@ -239,12 +356,11 @@ export default function KadrajApp() {
     })();
   }, [mediaItems]);
 
-  // Tüm eksik afişleri toplu çekme fonksiyonu
   const handleSyncAllPosters = async () => {
     if (isSyncingPosters || !TMDB_API_KEY) return;
     const missing = mediaItems.filter((m) => !(m.poster_url || m.poster));
     if (missing.length === 0) {
-      alert("Tüm yapımların afişleri zaten yüklü!");
+      showNotification("Tüm yapımların afişleri zaten yüklü!");
       return;
     }
 
@@ -343,7 +459,6 @@ export default function KadrajApp() {
     }
   };
 
-  // Giriş İşlemi
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setAuthError("");
@@ -399,7 +514,6 @@ export default function KadrajApp() {
     setIsGuest(false);
   };
 
-  // Yeni Gruba Katılma
   const handleJoinNewGroup = async () => {
     if (!joinGroupCode.trim() || !currentUser) return;
     const code = joinGroupCode.trim().toUpperCase();
@@ -424,10 +538,9 @@ export default function KadrajApp() {
     setJoinGroupCode("");
     await fetchAllData();
     setSelectedGroup(inv.group_name);
-    alert(`"${inv.group_name}" grubuna başarıyla katıldın!`);
+    showNotification(`✅ "${inv.group_name}" grubuna başarıyla katıldın!`);
   };
 
-  // TMDB Canlı Arama
   useEffect(() => {
     const timer = setTimeout(async () => {
       if (tmdbQuery.trim().length < 2 || !TMDB_API_KEY) {
@@ -477,7 +590,6 @@ export default function KadrajApp() {
     setTmdbQuery("");
   };
 
-  // Film / Dizi Ekleme (Mükerrer / Çift Kayıt Engelli + Otomatik Afiş)
   const handleAddMedia = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newTitle.trim() || !currentUser || isGuest) return;
@@ -535,6 +647,7 @@ export default function KadrajApp() {
 
     if (data) {
       setMediaItems([data, ...mediaItems]);
+      showNotification(`✅ "${data.title}" listeye eklendi!`);
     }
     setNewTitle("");
     setNewPoster("");
@@ -543,7 +656,6 @@ export default function KadrajApp() {
     setShowAddModal(false);
   };
 
-  // Listeden Çıkarma (Silme)
   const handleDeleteMedia = async (item: MediaItem) => {
     if (isGuest) return;
     const confirmed = window.confirm(
@@ -557,9 +669,9 @@ export default function KadrajApp() {
       return;
     }
     setMediaItems((prev) => prev.filter((m) => m.id !== item.id));
+    showNotification(`🗑️ "${item.title}" listeden çıkarıldı.`);
   };
 
-  // İzlendi Durumu Değiştirme
   const toggleWatched = async (item: MediaItem) => {
     if (isGuest) return;
     const updated = !item.watched;
@@ -569,7 +681,6 @@ export default function KadrajApp() {
     );
   };
 
-  // Kurucu Efsanesi veya Üye Efsanesi Durumu Değiştirme
   const toggleLegendStatus = async (item: MediaItem, makeFounderLegend = false) => {
     if (isGuest) return;
     const updatedLegend = !item.is_legend;
@@ -592,7 +703,6 @@ export default function KadrajApp() {
     }
   };
 
-  // Tekil Tartışma Listesi (Aynı İsimli Filmleri Birleştirir)
   const uniqueDiscussionMovies = useMemo(() => {
     const map = new Map<string, MediaItem>();
     mediaItems.forEach((m) => {
@@ -606,7 +716,6 @@ export default function KadrajApp() {
     );
   }, [mediaItems, discussionSearch]);
 
-  // Seçili Filmin Tüm ID Eşleşmeleri
   const selectedMovieIds = useMemo(() => {
     if (!selectedDiscussionTitle) return [];
     const targetKey = selectedDiscussionTitle.trim().toLowerCase();
@@ -615,7 +724,6 @@ export default function KadrajApp() {
       .map((m) => String(m.id));
   }, [mediaItems, selectedDiscussionTitle]);
 
-  // Yorum Gönderme
   const handleAddComment = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newCommentText.trim() || !selectedDiscussionTitle || !currentUser || isGuest)
@@ -649,7 +757,6 @@ export default function KadrajApp() {
     }
   };
 
-  // "Bugün Ne İzlesek?" Öneri Motoru
   const handleSpinWheel = async () => {
     setIsSpinning(true);
     setWheelResult(null);
@@ -744,7 +851,6 @@ export default function KadrajApp() {
     }, 700);
   };
 
-  // Davet Kodu ve Tek Kullanımlık Link Üretme
   const generateInviteCode = async (singleUseGuest = false) => {
     if (isGuest) return;
     const prefix = singleUseGuest ? "DAVUK-" : "KDRJ-";
@@ -776,7 +882,6 @@ export default function KadrajApp() {
     }
   };
 
-  // Efsanelerim Listesi Ayrımı
   const founderLegends = useMemo(() => {
     const seen = new Set<string>();
     return mediaItems.filter((m) => {
@@ -807,7 +912,6 @@ export default function KadrajApp() {
     });
   }, [mediaItems, selectedMemberLegend]);
 
-  // Giriş Ekranı
   if (!currentUser) {
     return (
       <div className="min-h-screen bg-[#0b0f17] text-white flex items-center justify-center p-4">
@@ -862,7 +966,6 @@ export default function KadrajApp() {
     );
   }
 
-  // Aktif Sekmeye Göre Filmleri Filtreleme
   const displayedMedia = mediaItems.filter((item) => {
     if (activeTab === "shared") {
       if (!item.is_shared_club) return false;
@@ -891,8 +994,8 @@ export default function KadrajApp() {
   return (
     <div className="min-h-screen bg-[#0b0f17] text-gray-100 flex flex-col">
       {/* Üst Bar */}
-      <header className="border-b border-gray-800 bg-[#111827]/90 backdrop-blur sticky top-0 z-30">
-        <div className="max-w-7xl mx-auto px-4 py-4 flex flex-wrap items-center justify-between gap-4">
+      <header className="border-b border-gray-800 bg-[#111827]/95 backdrop-blur sticky top-0 z-30">
+        <div className="max-w-7xl mx-auto px-4 py-3.5 flex flex-wrap items-center justify-between gap-4">
           <div className="flex items-center gap-3">
             <span className="text-2xl font-black text-amber-500 tracking-wider">
               🎬 KADRAJ
@@ -979,7 +1082,128 @@ export default function KadrajApp() {
             </button>
           </nav>
         </div>
+
+        {/* HER SEKMEDE GÖRÜNÜR CANLI TMDB FİLM & DİZİ ARAMA ÇUBUĞU */}
+        {!isGuest && (
+          <div className="border-t border-gray-800/80 bg-[#0d1320] px-4 py-3">
+            <div className="max-w-7xl mx-auto relative">
+              <div className="flex flex-wrap items-center gap-3">
+                <div className="relative flex-1 min-w-[260px]">
+                  <input
+                    type="text"
+                    placeholder="🔍 Film veya dizi ara ve tek tıkla listeye ekle (TMDB Canlı Arama)..."
+                    value={globalSearchQuery}
+                    onChange={(e) => setGlobalSearchQuery(e.target.value)}
+                    className="w-full bg-[#131b2e] border border-amber-500/40 focus:border-amber-500 rounded-xl px-4 py-2.5 text-sm text-white outline-none"
+                  />
+                  {globalSearchQuery && (
+                    <button
+                      onClick={() => {
+                        setGlobalSearchQuery("");
+                        setGlobalSearchResults([]);
+                      }}
+                      className="absolute right-3 top-2.5 text-gray-400 hover:text-white text-sm"
+                    >
+                      ✕
+                    </button>
+                  )}
+                </div>
+                <span className="text-xs text-gray-400 hidden sm:inline">
+                  Aktif Grup: <strong className="text-amber-400">{selectedGroup}</strong>
+                </span>
+              </div>
+
+              {/* Canlı Arama Sonuç Açılır Penceresi */}
+              {globalSearchQuery.trim().length >= 2 && (
+                <div className="absolute left-0 right-0 top-12 bg-[#131b2e] border border-amber-500/40 rounded-2xl shadow-2xl max-h-96 overflow-y-auto z-50 divide-y divide-gray-800">
+                  {!TMDB_API_KEY ? (
+                    <div className="p-4 text-xs text-red-300">
+                      ⚠️ TMDB API anahtarı bulunamadı. Lütfen Vercel ayarlarından{" "}
+                      <code>NEXT_PUBLIC_TMDB_API_KEY</code> değişkenini ekleyin.
+                    </div>
+                  ) : isSearchingGlobal ? (
+                    <div className="p-4 text-xs text-gray-400">
+                      TMDB veritabanında aranıyor...
+                    </div>
+                  ) : globalSearchResults.length === 0 ? (
+                    <div className="p-4 text-xs text-gray-400">
+                      &quot;{globalSearchQuery}&quot; için sonuç bulunamadı.
+                    </div>
+                  ) : (
+                    globalSearchResults.map((r) => (
+                      <div
+                        key={r.id}
+                        className="p-3 flex flex-wrap items-center justify-between gap-3 hover:bg-[#0b0f17]/80 transition"
+                      >
+                        <div className="flex items-center gap-3 min-w-0">
+                          {r.poster_path ? (
+                            <img
+                              src={`https://image.tmdb.org/t/p/w92${r.poster_path}`}
+                              alt=""
+                              className="w-10 h-14 object-cover rounded-lg flex-shrink-0"
+                            />
+                          ) : (
+                            <div className="w-10 h-14 bg-gray-800 rounded-lg flex items-center justify-center text-xs text-gray-500 flex-shrink-0">
+                              🎬
+                            </div>
+                          )}
+                          <div className="min-w-0">
+                            <p className="text-sm font-bold text-white truncate">
+                              {r.title || r.name}
+                            </p>
+                            <p className="text-xs text-gray-400">
+                              {r.media_type === "tv" ? "📺 Dizi" : "🎬 Film"} •{" "}
+                              {(r.release_date || r.first_air_date || "").slice(0, 4) ||
+                                "Yıl Yok"}{" "}
+                              • ★ {r.vote_average ? r.vote_average.toFixed(1) : "-"}
+                            </p>
+                          </div>
+                        </div>
+
+                        <div className="flex flex-wrap items-center gap-2">
+                          <button
+                            onClick={() =>
+                              handleQuickAddFromTopSearch(r, "personal")
+                            }
+                            className="px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-black font-bold text-xs transition"
+                          >
+                            + Kişisel Arşive
+                          </button>
+                          <button
+                            onClick={() =>
+                              handleQuickAddFromTopSearch(r, "shared")
+                            }
+                            className="px-3 py-1.5 rounded-lg bg-gray-800 hover:bg-gray-700 text-amber-400 border border-amber-500/30 font-semibold text-xs transition"
+                          >
+                            + {selectedGroup}
+                          </button>
+                          {isFounder && (
+                            <button
+                              onClick={() =>
+                                handleQuickAddFromTopSearch(r, "legend")
+                              }
+                              className="px-2.5 py-1.5 rounded-lg bg-purple-900/50 hover:bg-purple-800 text-purple-200 border border-purple-500/30 font-semibold text-xs transition"
+                            >
+                              👑 Efsane Yap
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
       </header>
+
+      {/* Bildirim Toast */}
+      {quickToast && (
+        <div className="fixed bottom-5 right-5 bg-amber-500 text-black font-bold text-sm px-5 py-3 rounded-xl shadow-2xl z-50">
+          {quickToast}
+        </div>
+      )}
 
       <main className="max-w-7xl mx-auto w-full px-4 py-8 flex-1">
         {/* 1. EFSANELERİM VİTRİNİ */}
@@ -993,7 +1217,7 @@ export default function KadrajApp() {
                   </h2>
                   <p className="text-gray-400 text-sm">
                     {isFounder
-                      ? "Kurucu yetkisi aktif: Yanlış eklenmiş filmleri '❌ Efsanelerden Çıkar' butonuyla kaldırabilirsin."
+                      ? "Kurucu yetkisi aktif: Üstteki arama çubuğundan yeni efsane ekleyebilir veya yanlış filmleri çıkarabilirsin."
                       : "Kulüp kurucusu Duhan tarafından seçilen başyapıtlar."}
                   </p>
                 </div>
@@ -1056,7 +1280,6 @@ export default function KadrajApp() {
               </div>
             </div>
 
-            {/* Üyelerin Efsaneleri */}
             <div className="bg-[#131b2e] border border-gray-800 rounded-2xl p-6">
               <div className="flex flex-wrap items-center justify-between gap-4 mb-4">
                 <h3 className="text-xl font-bold text-white">
@@ -1162,8 +1385,8 @@ export default function KadrajApp() {
                     className="bg-amber-500 hover:bg-amber-400 text-black font-bold px-5 py-2.5 rounded-xl transition"
                   >
                     {activeTab === "shared"
-                      ? `+ ${selectedGroup} Listesine Ekle`
-                      : "+ Kişisel Listeme Ekle"}
+                      ? `+ ${selectedGroup} Listesine Detaylı Ekle`
+                      : "+ Kişisel Listeme Detaylı Ekle"}
                   </button>
                 )}
               </div>
@@ -1172,7 +1395,7 @@ export default function KadrajApp() {
             <div className="flex flex-wrap gap-3">
               <input
                 type="text"
-                placeholder="Arşivde film veya dizi ara..."
+                placeholder="Arşiv içi filtrele..."
                 value={searchFilter}
                 onChange={(e) => setSearchFilter(e.target.value)}
                 className="flex-1 min-w-[220px] bg-[#131b2e] border border-gray-800 rounded-xl px-4 py-2.5 text-sm text-white"
@@ -1693,7 +1916,7 @@ export default function KadrajApp() {
         )}
       </main>
 
-      {/* YENİ FİLM / DİZİ EKLEME MODALI */}
+      {/* DETAYLI EKLEME MODALI */}
       {showAddModal && (
         <div className="fixed inset-0 bg-black/75 flex items-center justify-center p-4 z-50">
           <div className="bg-[#131b2e] border border-gray-700 rounded-2xl max-w-lg w-full p-6 space-y-4">
