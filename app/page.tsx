@@ -1172,7 +1172,7 @@ export default function KadrajApp() {
               </label>
               <input
                 type="text"
-                placeholder="Örn: Duhan"
+                placeholder=""
                 value={loginName}
                 onChange={(e) => setLoginName(e.target.value)}
                 className="w-full bg-[#0b0f17] border border-gray-700 rounded-lg px-4 py-3 text-white focus:border-amber-500 outline-none"
@@ -1184,7 +1184,7 @@ export default function KadrajApp() {
               </label>
               <input
                 type="text"
-                placeholder="Örn: KDRJ2026 veya KONYA26"
+                placeholder=""
                 value={inviteCodeInput}
                 onChange={(e) => setInviteCodeInput(e.target.value)}
                 className="w-full bg-[#0b0f17] border border-gray-700 rounded-lg px-4 py-3 text-white uppercase focus:border-amber-500 outline-none"
